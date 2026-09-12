@@ -599,16 +599,11 @@ def build_help_message() -> str:
         _DIVIDER,
         "",
         "<b>Signal &amp; Market</b>",
-        "🔹 /signals — Active ENTRY_READY signals (TP/SL/EP, R:R, cross, cascade)",
-        "🔹 /top — Top 5 candidates by readiness",
-        "",
-        "<b>System</b>",
-        "🔹 /status — Engine status &amp; live target count",
-        "🔹 /health — Full system health report",
-        "🔹 /armed — Currently ARMED targets",
-        "🔹 /ping — Liveness check",
-        "",
-        "<b>Info</b>",
+        "🔹 /signals — Active ENTRY_READY signals (EP/SL/TP, cascade, AI)",
+        "🔹 /top — Top 5 candidates by readiness score",
+        "🔹 /backtest — Backtest performance (win rate, PnL, Sharpe)",
+        "🔹 /stats — Model statistics (signals, outcomes, decisions)",
+        "🔹 /health — System health & engine status",
         "🔹 /help — This message",
         "",
         "🕒 A full health report is auto-delivered every 12 hours.",
@@ -777,10 +772,16 @@ class EnhancedTelegramBot:
                 await self._cmd_health()
             elif cmd == "/top":
                 await self._cmd_top()
+            elif cmd == "/backtest":
+                await self._cmd_backtest()
+            elif cmd == "/stats":
+                await self._cmd_stats()
             elif cmd == "/help":
                 await self._cmd_help()
-            elif cmd in ("/status", "/armed", "/ping"):
+            elif cmd == "/status":
                 await self._cmd_legacy(cmd)
+            elif cmd in ("/armed", "/ping"):
+                await self.send_message("⚠️ This command has been removed. Use /health or /signals.")
             else:
                 # Unknown command — only respond if it really looks like one
                 # (starts with /) to avoid noise from stray text.
@@ -802,6 +803,74 @@ class EnhancedTelegramBot:
     async def _cmd_top(self) -> None:
         candidates = _get_top_candidates(self.db, self.scanner)
         await self.send_message(build_top_message(candidates))
+
+    async def _cmd_backtest(self) -> None:
+        """Show backtest performance stats."""
+        try:
+            import sqlite3
+            bt = sqlite3.connect("/app/data/backtest_v2.db")
+            bc = bt.cursor()
+            bc.execute("SELECT COUNT(*), SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END), SUM(CASE WHEN pnl_usd < 0 THEN 1 ELSE 0 END), SUM(pnl_usd), AVG(pnl_usd) FROM bt_v2_trades")
+            r = bc.fetchone()
+            trades, wins, losses, total_pnl, avg_pnl = r if r[0] else (0, 0, 0, 0, 0)
+            win_rate = (wins / trades * 100) if trades > 0 else 0
+            bc.execute("SELECT symbol, outcome, pnl_usd, leverage FROM bt_v2_trades ORDER BY id DESC LIMIT 5")
+            recent = bc.fetchall()
+            bt.close()
+            lines = [
+                "📊 <b>Backtest Performance</b>",
+                "━━━━━━━━━━━━━━━━━━━━",
+                f"📈 Trades: <b>{trades}</b> ({wins}W / {losses}L)",
+                f"🎯 Win Rate: <b>{win_rate:.1f}%</b>",
+                f"💰 Total PnL: <b>${total_pnl:.2f}</b> (${100 + total_pnl:.2f} from $100)",
+                f"─ Avg PnL: <b>${avg_pnl:.2f}/trade</b>",
+                "",
+                "📋 <b>Recent Trades:</b>",
+            ]
+            for t in recent:
+                icon = "✅" if t[2] > 0 else "❌" if t[2] < 0 else "⏰"
+                lines.append(f"{icon} {t[0].split('/')[0]} · {t[1]} · ${t[2]:.2f} · {t[3]}x")
+            if not recent:
+                lines.append("No trades yet.")
+            lines.append("")
+            lines.append("💡 <i>Each new ENTRY_READY signal is auto-backtested.</i>")
+            await self.send_message("\n".join(lines))
+        except Exception as exc:
+            await self.send_message(f"⚠️ Backtest data unavailable: {exc}")
+
+    async def _cmd_stats(self) -> None:
+        """Show model statistics."""
+        try:
+            import sqlite3
+            db = sqlite3.connect("/app/data/waterfall_registry.db")
+            dc = db.cursor()
+            dc.execute("SELECT COUNT(*) FROM lbank_signal_ledger")
+            total_signals = dc.fetchone()[0]
+            dc.execute("SELECT COUNT(*) FROM lbank_signal_outcomes")
+            total_outcomes = dc.fetchone()[0]
+            dc.execute("SELECT outcome_status, COUNT(*) FROM lbank_signal_outcomes GROUP BY outcome_status ORDER BY COUNT(*) DESC LIMIT 5")
+            outcomes = dc.fetchall()
+            dc.execute("SELECT decision, COUNT(*) FROM entry_decision_events GROUP BY decision ORDER BY COUNT(*) DESC LIMIT 5")
+            decisions = dc.fetchall()
+            lines = [
+                "📊 <b>Model Statistics</b>",
+                "━━━━━━━━━━━━━━━━━━━━",
+                f"🌊 Total Signals: <b>{total_signals}</b>",
+                f"📋 Outcomes: <b>{total_outcomes}</b>",
+                "",
+                "<b>Top Outcomes:</b>",
+            ]
+            for o, n in outcomes:
+                pct = (n / total_outcomes * 100) if total_outcomes > 0 else 0
+                lines.append(f"  {o}: {n} ({pct:.1f}%)")
+            lines.append("")
+            lines.append("<b>Decision States:</b>")
+            for d, n in decisions:
+                lines.append(f"  {d}: {n:,}")
+            db.close()
+            await self.send_message("\n".join(lines))
+        except Exception as exc:
+            await self.send_message(f"⚠️ Stats unavailable: {exc}")
 
     async def _cmd_help(self) -> None:
         await self.send_message(build_help_message())
