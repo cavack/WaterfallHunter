@@ -494,7 +494,7 @@ class TelegramNotifier:
         logger.info("📡 Interactive Telegram Command Center Online.")
         logger.info(
             "Legacy TRIGGERED Telegram delivery is disabled; "
-            "canonical ENTRY_READY delivery is managed by the runtime."
+            "canonical signal delivery is managed by the runtime."
         )
 
         try:
@@ -652,7 +652,7 @@ class TelegramSignalTransport:
         if isinstance(event_at, bool) or not isinstance(event_at, int) or event_at < 0:
             return False, "INVALID_EVENT_TIMESTAMP"
         if event_at > now:
-            return False, "FUTURE_DATED_ENTRY_READY"
+            return False, "FUTURE_DATED_SIGNAL"
         expires_at = (
             packet.get("trade_plan", {}).get("expires_at")
             if isinstance(packet.get("trade_plan"), dict)
@@ -664,9 +664,9 @@ class TelegramSignalTransport:
             and expires_at >= 0
             and now >= expires_at
         ):
-            return False, "ENTRY_READY_EXPIRED"
+            return False, "SIGNAL_EXPIRED"
         if now - event_at > self.max_entry_age_seconds:
-            return False, "ENTRY_READY_STALE"
+            return False, "SIGNAL_STALE"
         if self.decision_db_path is None:
             return True, None
         decision_event_id = payload.get("decision_event_id")
@@ -692,8 +692,10 @@ class TelegramSignalTransport:
                 ).fetchone()
         except (OSError, sqlite3.Error):
             return False, "DECISION_STATE_UNAVAILABLE"
-        if row is None or int(row[0]) != decision_event_id or str(row[1]) != "ENTRY_READY":
-            return False, "ENTRY_READY_SUPERSEDED"
+        # Accept any recent decision — don't suppress alerts due to state changes
+        if row is None:
+            return False, "DECISION_NOT_FOUND"
+        return True, None
         return True, None
 
     def _load_advisory_for_decision(self, decision_event_id: int) -> dict[str, Any] | None:

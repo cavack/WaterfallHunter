@@ -1104,7 +1104,7 @@ def _build_entry_notification_worker() -> DurableNotificationWorker | None:
     )
 
 
-async def _entry_notification_loop(interval_seconds: float = 2.0) -> None:
+async def _entry_notification_loop(interval_seconds: float = 0.5) -> None:
     while _hunter_running:
         worker = _entry_notification_worker
         if worker is None:
@@ -2105,7 +2105,7 @@ def _restore_persisted_decision_projection(
     if isinstance(event_id, int) and not isinstance(event_id, bool) and event_id > 0:
         current_decision["event_id"] = event_id
         current_decision["event_persisted"] = False
-    if current_decision.get("decision") == "ENTRY_READY":
+    if current_decision.get("decision") in ("ENTRY_READY", "FORMING"):
         persisted_plan = persisted_decision.get("trade_plan")
         if isinstance(persisted_plan, dict):
             current_decision["trade_plan"] = dict(persisted_plan)
@@ -2182,7 +2182,7 @@ def _project_entry_decision_freshness(
     reference_age_seconds: float | None,
 ) -> dict[str, Any]:
     stored = metrics.get("entry_decision")
-    if not isinstance(stored, dict) or stored.get("decision") not in {"FORMING", "ENTRY_READY", "ACTIVE"}:
+    if not isinstance(stored, dict) or stored.get("decision") not in {"FORMING", "ENTRY_READY", "ACTIVE", "NO_TRADE"}:
         return metrics
 
     explicit_expiry = build_expired_entry_decision(stored, evaluated_at=int(evaluated_at))
@@ -4034,7 +4034,7 @@ async def evaluate_candidate(
         if _signal_alert_allowed(metrics):
             logger.info(
                 "STRICT TRIGGERED event %s persisted without proactive Telegram; "
-                "delivery is reserved for canonical ENTRY_READY transitions",
+                "delivery is reserved for canonical ENTRY_READY and FORMING transitions",
                 signal_id,
             )
         else:

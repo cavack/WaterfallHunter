@@ -16,7 +16,7 @@ class EntryDecisionPolicy:
     version: str = "entry_policy_v2_calibrated"
     forming_minimum: float = 55.0
     entry_ready_minimum: float = 70.0
-    max_analysis_age_seconds: float = 180.0
+    max_analysis_age_seconds: float = 600.0
     max_reference_age_seconds: float = 60.0
     anti_chase_hard_block_atr: float = 2.5
     maximum_spread_pct: float = 0.30
