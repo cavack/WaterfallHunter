@@ -1,0 +1,59 @@
+groups:
+  - name: waterfall
+    rules:
+      - alert: WaterfallBackendDown
+        expr: up{job="waterfall-backend"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Waterfall backend is unreachable
+      - alert: WaterfallBackendMemoryPressure
+        expr: process_resident_memory_bytes{job="waterfall-backend"} > 1610612736
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Waterfall backend RSS exceeds 75% of its 2 GiB memory limit
+      - alert: WaterfallBackendMemoryGrowth
+        expr: deriv(process_resident_memory_bytes{job="waterfall-backend"}[10m]) > 87381
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Waterfall backend RSS is growing faster than 5 MiB/min
+      - alert: WaterfallBackendRestarted
+        expr: changes(process_start_time_seconds{job="waterfall-backend"}[10m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: Waterfall backend process restarted within the last 10 minutes
+      - alert: WaterfallWebSocketOrphanSubscriptions
+        expr: waterfall_websocket_ccxt_subscriptions > waterfall_websocket_active_tasks + 3 * waterfall_websocket_shared_evidence_active_subscribers + 8
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: CCXT WebSocket subscriptions materially exceed owned consumer tasks
+      - alert: WaterfallWebSocketOrphanClients
+        expr: waterfall_websocket_ccxt_clients > waterfall_websocket_ccxt_subscriptions + 8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: CCXT WebSocket clients remain without corresponding subscriptions
+      - alert: WaterfallWebSocketRetirementBacklog
+        expr: waterfall_websocket_direct_exchange_retire_tasks + waterfall_websocket_liquidation_exchange_retire_tasks + waterfall_websocket_shared_evidence_reconcile_tasks > 8
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: WebSocket exchange retirement tasks are not draining
+      - alert: WaterfallSharedWebSocketRetirementBlocked
+        expr: waterfall_websocket_shared_evidence_blocked_exchanges > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Shared WebSocket replacement is blocked by unproven transport retirement

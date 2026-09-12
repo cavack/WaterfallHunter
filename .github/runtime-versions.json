@@ -1,0 +1,8 @@
+{
+  "backend_python": "3.13",
+  "backend_image": "python@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a",
+  "frontend_node": "26",
+  "frontend_image": "node@sha256:aadf416b2cdce311a8811ba3f0608a61b77dbf997500e2eafe781b51f6a0b019",
+  "watchdog_python": "3.13",
+  "watchdog_image": "python@sha256:540c7d91f98ff6880174c40e99067bf5941eb54d818a7a5e094d188b196a934d"
+}

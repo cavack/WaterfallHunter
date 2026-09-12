@@ -1,0 +1,84 @@
+[
+  {
+    "name": "complete_experimental",
+    "signal_row": {
+      "id": 11,
+      "trigger_metrics_json": "{\"analysis_observed_at\":1700000000,\"decision_contract_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"model_generation\":\"waterfall_signal_model_v1\",\"reference_observed_at\":1699999990,\"score_version\":\"score_v2_watch_v1\",\"strategy_profile\":\"experimental_pretrigger_v1\"}"
+    },
+    "expected_status": "RESOLVED",
+    "expected_signal_class": "EXPERIMENTAL"
+  },
+  {
+    "name": "profile_only_experimental",
+    "signal_row": {
+      "id": 12,
+      "trigger_metrics_json": "{\"strategy_profile\":\"experimental_pretrigger_v1\"}"
+    },
+    "expected_status": "UNRESOLVED"
+  },
+  {
+    "name": "missing_decision_hash",
+    "signal_row": {
+      "id": 13,
+      "trigger_metrics_json": "{\"analysis_observed_at\":1700000000,\"model_generation\":\"waterfall_signal_model_v1\",\"score_version\":\"score_v2_watch_v1\",\"strategy_profile\":\"experimental_pretrigger_v1\"}"
+    },
+    "expected_status": "UNRESOLVED"
+  },
+  {
+    "name": "missing_analysis_timestamp",
+    "signal_row": {
+      "id": 14,
+      "trigger_metrics_json": "{\"decision_contract_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"model_generation\":\"waterfall_signal_model_v1\",\"score_version\":\"score_v2_watch_v1\",\"strategy_profile\":\"experimental_pretrigger_v1\"}"
+    },
+    "expected_status": "UNRESOLVED"
+  },
+  {
+    "name": "unknown_profile",
+    "signal_row": {
+      "id": 15,
+      "trigger_metrics_json": "{\"analysis_observed_at\":1700000000,\"decision_contract_hash\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"model_generation\":\"waterfall_signal_model_v1\",\"score_version\":\"score_v2\",\"strategy_profile\":\"legacy_unknown_v1\"}"
+    },
+    "expected_status": "UNRESOLVED"
+  },
+  {
+    "name": "contradictory_class_profile",
+    "signal_row": {
+      "id": 16,
+      "trigger_metrics_json": "{\"analysis_observed_at\":1700000000,\"decision_contract_hash\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"model_generation\":\"waterfall_signal_model_v1\",\"score_version\":\"score_v2_watch_v1\",\"signal_class\":\"STRICT\",\"strategy_profile\":\"experimental_pretrigger_v1\"}"
+    },
+    "expected_status": "CONFLICT"
+  },
+  {
+    "name": "complete_strict",
+    "signal_row": {
+      "id": 17,
+      "trigger_metrics_json": "{\"analysis_observed_at\":1700000000,\"decision_contract_hash\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"model_generation\":\"waterfall_signal_model_v1\",\"reference_observed_at\":1699999990,\"score_version\":\"score_v2\",\"strategy_profile\":\"strict_score_v2\"}"
+    },
+    "expected_status": "RESOLVED",
+    "expected_signal_class": "STRICT"
+  },
+  {
+    "name": "score_version_conflict",
+    "signal_row": {
+      "id": 18,
+      "trigger_metrics_json": "{\"analysis_observed_at\":1700000000,\"decision_contract_hash\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"model_generation\":\"waterfall_signal_model_v1\",\"score_version\":\"score_v1\",\"strategy_profile\":\"strict_score_v2\"}"
+    },
+    "expected_status": "CONFLICT"
+  },
+  {
+    "name": "malformed_trigger_metrics",
+    "signal_row": {
+      "id": 19,
+      "trigger_metrics_json": "{not-json"
+    },
+    "expected_status": "UNRESOLVED"
+  },
+  {
+    "name": "invalid_reference_timestamp",
+    "signal_row": {
+      "id": 20,
+      "trigger_metrics_json": "{\"analysis_observed_at\":1700000000,\"decision_contract_hash\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"model_generation\":\"waterfall_signal_model_v1\",\"reference_observed_at\":-1,\"score_version\":\"score_v2\",\"strategy_profile\":\"strict_score_v2\"}"
+    },
+    "expected_status": "UNRESOLVED"
+  }
+]

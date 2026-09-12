@@ -1,0 +1,46 @@
+{
+  "canonical_ref_policy": "resolve current target SHA in GitHub at execution time",
+  "canonical_repository": "cavack/WFH-ORG",
+  "canonical_skill_root": "skills/waterfallhunter",
+  "certification_status": "TEMPLATE_NOT_CERTIFIED",
+  "contract_version": "wfh_chatgpt_project_sources_v2",
+  "council_contract": "wfh_agent_council_v2",
+  "overlay_files": [
+    "00-WFH-CHATGPT-ROUTER-v2.md",
+    "01-WFH-SKILL-CATALOG-v2.md",
+    "02-WFH-CAPABILITY-MAP-v2.md",
+    "03-WFH-SKILL-AUDIT-SUMMARY-v2.md",
+    "PROJECT-INSTRUCTIONS-v2.txt",
+    "INSTALL-FA-v2.md",
+    "TWFH-RESUME.md"
+  ],
+  "sha256": {
+    "00-WFH-CHATGPT-ROUTER-v2.md": "b5721164ec009e567cf8b0a27125cbcf8e47d57e79ab3f7eda489195789f879e",
+    "01-WFH-SKILL-CATALOG-v2.md": "e4bd7a44b16280924fdb5265811004778fcfdbaac3a6797d82932a5e5f5a3e16",
+    "02-WFH-CAPABILITY-MAP-v2.md": "775fb130f6f6c733cd8879d9ecba497611d7a27abbc63bf2c1312f55be7f3d7d",
+    "03-WFH-SKILL-AUDIT-SUMMARY-v2.md": "2f4311cd1379f0b17b79df584b4dff8d87d396562133f09c0bba31e4aa5f87c1",
+    "INSTALL-FA-v2.md": "7fa4cfb3b63660dbb20c2e3a7962b0ad7f0bd9b9c56cc05e1ea2b7770bde4ace",
+    "PROJECT-INSTRUCTIONS-v2.txt": "83dd4b1618a3c7cc3fa63faa2ebad77750a9d2ae12997a2c5e11f542b41c02bb",
+    "TWFH-RESUME.md": "fc59937edb2f5c58acfadce5aa5808fb6418935232050dad67b4ea00de31e9b4"
+  },
+  "skills": [
+    "api-contract-schema-guardian",
+    "backend-data-architecture",
+    "engineering-orchestrator",
+    "frontend-dashboard-ux",
+    "market-data-evidence-quality",
+    "observability-incident-response",
+    "release-production-certification",
+    "repository-architecture-auditor",
+    "runtime-reliability-performance",
+    "scientific-backtest-validation",
+    "security-supply-chain",
+    "skill-system-curator",
+    "strategy-score-lifecycle",
+    "verification-regression"
+  ],
+  "source_commit_sha": "GENERATED_AT_EXPORT",
+  "source_provenance_policy": "runtime exporter adds source_commit_sha, source_ref, and source_worktree_dirty",
+  "source_ref": "GENERATED_AT_EXPORT",
+  "source_worktree_dirty": null
+}

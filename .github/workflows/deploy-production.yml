@@ -1,0 +1,105 @@
+name: Deploy Production
+
+on:
+  workflow_call:
+    inputs:
+      tested_backend_image_digest:
+        required: true
+        type: string
+      tested_frontend_image_digest:
+        required: true
+        type: string
+      tested_watchdog_image_digest:
+        required: true
+        type: string
+      tested_image_bundle_sha256:
+        required: true
+        type: string
+
+concurrency:
+  group: waterfallhunter-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    permissions:
+      contents: read
+    runs-on: [self-hosted, linux, x64, "wfh-production-${{ github.run_id }}-${{ github.run_attempt }}"]
+    environment: production
+    timeout-minutes: 45
+    env:
+      WFH_DEPLOY_SHA: ${{ github.sha }}
+      WFH_TESTED_BACKEND_IMAGE_DIGEST: ${{ inputs.tested_backend_image_digest }}
+      WFH_TESTED_FRONTEND_IMAGE_DIGEST: ${{ inputs.tested_frontend_image_digest }}
+      WFH_TESTED_WATCHDOG_IMAGE_DIGEST: ${{ inputs.tested_watchdog_image_digest }}
+      WFH_TESTED_IMAGE_BUNDLE_SHA256: ${{ inputs.tested_image_bundle_sha256 }}
+    steps:
+      - name: Checkout exact trusted main revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Reject non-canonical repository
+        shell: bash
+        run: test "$GITHUB_REPOSITORY" = "cavack/WFH-ORG"
+
+      - name: Verify self-hosted Production runner boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(id -un)" = "wfh-deploy"
+          test "${RUNNER_OS:-}" = "Linux"
+          test "${RUNNER_ARCH:-}" = "X64"
+          test -x /usr/local/sbin/wfh-production-deploy
+          sudo -n -l /usr/local/sbin/wfh-production-deploy >/dev/null
+
+      - name: Verify exact trusted main revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$WFH_DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$WFH_DEPLOY_SHA"
+          git fetch --no-tags origin main
+          git cat-file -e "${WFH_DEPLOY_SHA}^{commit}"
+          test "$(git rev-parse origin/main)" = "$WFH_DEPLOY_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          [[ "$WFH_TESTED_BACKEND_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$WFH_TESTED_FRONTEND_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$WFH_TESTED_WATCHDOG_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$WFH_TESTED_IMAGE_BUNDLE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+
+      - name: Download exact CI-tested image bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: wfh-tested-images-${{ github.sha }}
+          path: ${{ runner.temp }}/wfh-deploy-artifact
+
+      - name: Verify exact CI-tested image bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir="$RUNNER_TEMP/wfh-deploy-artifact"
+          test -f "$artifact_dir/wfh-tested-images.tar"
+          test -f "$artifact_dir/wfh-tested-images.tar.sha256"
+          test -f "$artifact_dir/image-digests.txt"
+          test "$(sha256sum "$artifact_dir/wfh-tested-images.tar" | awk '{print $1}')" = "$WFH_TESTED_IMAGE_BUNDLE_SHA256"
+          grep -Fx "backend=$WFH_TESTED_BACKEND_IMAGE_DIGEST" "$artifact_dir/image-digests.txt"
+          grep -Fx "frontend=$WFH_TESTED_FRONTEND_IMAGE_DIGEST" "$artifact_dir/image-digests.txt"
+          grep -Fx "watchdog=$WFH_TESTED_WATCHDOG_IMAGE_DIGEST" "$artifact_dir/image-digests.txt"
+          grep -Fx "revision=$WFH_DEPLOY_SHA" "$artifact_dir/image-digests.txt"
+
+      - name: Deploy exact CI revision on Production host
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo /usr/local/sbin/wfh-production-deploy \
+            --sha "$WFH_DEPLOY_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --checkout "$GITHUB_WORKSPACE" \
+            --bundle "$RUNNER_TEMP/wfh-deploy-artifact/wfh-tested-images.tar" \
+            --manifest "$RUNNER_TEMP/wfh-deploy-artifact/image-digests.txt" \
+            --bundle-sha256 "$WFH_TESTED_IMAGE_BUNDLE_SHA256" \
+            --backend-digest "$WFH_TESTED_BACKEND_IMAGE_DIGEST" \
+            --frontend-digest "$WFH_TESTED_FRONTEND_IMAGE_DIGEST" \
+            --watchdog-digest "$WFH_TESTED_WATCHDOG_IMAGE_DIGEST"

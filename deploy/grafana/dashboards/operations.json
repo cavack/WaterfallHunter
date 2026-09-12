@@ -1,0 +1,1 @@
+{"annotations":{"list":[]},"editable":false,"panels":[{"type":"stat","title":"Backend Up","targets":[{"expr":"up{job=\"waterfall-backend\"}"}]},{"type":"stat","title":"Tracked Candidates","targets":[{"expr":"waterfall_tracked_candidates"}]}],"schemaVersion":39,"title":"WaterfallHunter Operations","version":1}

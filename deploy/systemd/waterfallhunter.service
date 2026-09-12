@@ -1,0 +1,18 @@
+[Unit]
+Description=WaterfallHunter canonical SIGNAL_ONLY stack
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/srv/waterfallhunter/app
+Environment=WFH_ENV_FILE=/etc/waterfallhunter/waterfallhunter.env
+ExecStart=/srv/waterfallhunter/app/scripts/production_compose.sh up -d --remove-orphans --no-build
+ExecStop=/srv/waterfallhunter/app/scripts/production_compose.sh stop --timeout 30
+TimeoutStartSec=180
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

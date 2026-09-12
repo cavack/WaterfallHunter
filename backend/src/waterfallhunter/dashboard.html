@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WaterfallHunter | Command Center</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .pulse-armed { animation: pulse-yellow 2s infinite; }
+        @keyframes pulse-yellow {
+            0% { box-shadow: 0 0 0 0 rgba(234, 179, 8, 0.7); }
+            70% { box-shadow: 0 0 0 10px rgba(234, 179, 8, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(234, 179, 8, 0); }
+        }
+        .pulse-triggered { animation: pulse-red 2s infinite; }
+        @keyframes pulse-red {
+            0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+            70% { box-shadow: 0 0 0 15px rgba(239, 68, 68, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+        }
+    </style>
+</head>
+<body class="bg-slate-900 text-gray-200 font-sans antialiased p-6">
+
+    <div class="max-w-7xl mx-auto">
+        <!-- Header -->
+        <div class="flex justify-between items-center mb-8 border-b border-slate-700 pb-4">
+            <div>
+                <h1 class="text-3xl font-bold text-white flex items-center gap-3">
+                    🌊 Waterfall<span class="text-blue-500">Hunter</span>
+                </h1>
+                <p class="text-slate-400 text-sm mt-1">Institutional-Grade Short Selling Engine (v4.3.1 - Quant Scoring)</p>
+            </div>
+            <div class="flex items-center gap-2">
+                <span class="relative flex h-3 w-3">
+                  <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                  <span class="relative inline-flex rounded-full h-3 w-3 bg-green-500"></span>
+                </span>
+                <span class="text-green-400 font-semibold text-sm">SYSTEM LIVE</span>
+            </div>
+        </div>
+
+        <!-- Stats Overview -->
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+            <div class="bg-slate-800 p-5 rounded-lg border border-slate-700 shadow-lg">
+                <p class="text-slate-400 text-sm font-medium">Total Tracked (Under $1)</p>
+                <p class="text-3xl font-bold text-white mt-2" id="stat-total">0</p>
+            </div>
+            <div class="bg-slate-800 p-5 rounded-lg border border-slate-700 shadow-lg">
+                <p class="text-slate-400 text-sm font-medium">Monitoring (WATCH)</p>
+                <p class="text-3xl font-bold text-blue-400 mt-2" id="stat-watch">0</p>
+            </div>
+            <div class="bg-slate-800 p-5 rounded-lg border border-yellow-600/30 shadow-lg pulse-armed relative">
+                <p class="text-slate-400 text-sm font-medium">Locked Targets (ARMED)</p>
+                <p class="text-3xl font-bold text-yellow-500 mt-2" id="stat-armed">0</p>
+            </div>
+            <div class="bg-slate-800 p-5 rounded-lg border border-red-600/30 shadow-lg pulse-triggered relative">
+                <p class="text-slate-400 text-sm font-medium">Shots Fired (TRIGGERED)</p>
+                <p class="text-3xl font-bold text-red-500 mt-2" id="stat-triggered">0</p>
+            </div>
+        </div>
+
+        <!-- Target Board -->
+        <div class="bg-slate-800 rounded-lg border border-slate-700 shadow-xl overflow-hidden">
+            <div class="px-6 py-4 border-b border-slate-700 bg-slate-800/50 flex justify-between items-center">
+                <h2 class="text-lg font-semibold text-white">Live Target Board</h2>
+                <span class="text-xs text-slate-400" id="last-update-time">Updating...</span>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="w-full text-left border-collapse">
+                    <thead>
+                        <tr class="bg-slate-900/50 text-slate-400 text-xs uppercase tracking-wider">
+                            <th class="px-6 py-3 font-medium">Symbol</th>
+                            <th class="px-6 py-3 font-medium">Type</th>
+                            <th class="px-6 py-3 font-medium">Current Price</th>
+                            <th class="px-6 py-3 font-medium">Score</th>
+                            <th class="px-6 py-3 font-medium">Status</th>
+                            <th class="px-6 py-3 font-medium">Time in System</th>
+                        </tr>
+                    </thead>
+                    <tbody id="targets-table" class="text-sm divide-y divide-slate-700/50">
+                        <!-- Data will be injected here via JS -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function escapeHtml(value) {
+            return String(value).replace(/[&<>"']/g, ch => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            })[ch]);
+        }
+
+        function getStatusBadge(status) {
+            if (status === 'WATCH') return `<span class="px-2 py-1 rounded-md bg-blue-500/10 text-blue-400 border border-blue-500/20 text-xs font-bold">👁️ WATCH</span>`;
+            if (status === 'ARMED') return `<span class="px-2 py-1 rounded-md bg-yellow-500/10 text-yellow-500 border border-yellow-500/20 text-xs font-bold pulse-armed">🎯 ARMED</span>`;
+            if (status === 'TRIGGERED') return `<span class="px-2 py-1 rounded-md bg-red-500/10 text-red-500 border border-red-500/20 text-xs font-bold pulse-triggered">💥 TRIGGERED</span>`;
+            return `<span class="px-2 py-1 rounded-md bg-gray-500/10 text-gray-400 border border-gray-500/20 text-xs font-bold">${status}</span>`;
+        }
+
+        function formatTime(timestamp) {
+            const diff = Math.floor(Date.now() / 1000) - timestamp;
+            if (diff < 60) return `${diff}s ago`;
+            if (diff < 3600) return `${Math.floor(diff/60)}m ago`;
+            return `${Math.floor(diff/3600)}h ago`;
+        }
+
+        async function fetchDashboardData() {
+            try {
+                // سیستم ضد-کش اضافه شده است: اضافه کردن Date.now باعث می‌شود مرورگر دیتای کهنه را دور بریزد
+                const response = await fetch('/api/candidates?_t=' + Date.now());
+                const data = await response.json();
+
+                let watchCount = 0, armedCount = 0, triggeredCount = 0;
+                let tableHtml = '';
+
+                const candidatesArray = Object.values(data.candidates);
+
+                // Sort by Score descending, then by Status weight
+                candidatesArray.sort((a, b) => {
+                    const scoreA = a.score || 0;
+                    const scoreB = b.score || 0;
+                    if (scoreB !== scoreA) return scoreB - scoreA;
+
+                    const weight = { 'TRIGGERED': 3, 'ARMED': 2, 'WATCH': 1 };
+                    return (weight[b.status] || 0) - (weight[a.status] || 0);
+                });
+
+                candidatesArray.forEach(c => {
+                    if (c.status === 'WATCH') watchCount++;
+                    if (c.status === 'ARMED') armedCount++;
+                    if (c.status === 'TRIGGERED') triggeredCount++;
+
+                    if (['WATCH', 'ARMED', 'TRIGGERED'].includes(c.status)) {
+                        const score = c.score || 0;
+                        let scoreColor = 'text-blue-400';
+                        if (score >= 85) scoreColor = 'text-red-500 font-bold animate-pulse';
+                        else if (score >= 50) scoreColor = 'text-yellow-400 font-bold';
+
+                        tableHtml += `
+                            <tr class="hover:bg-slate-700/20 transition-colors">
+                                <td class="px-6 py-4 font-bold text-white">${escapeHtml(c.symbol.split(':')[0])}</td>
+                                <td class="px-6 py-4 text-slate-400">${c.is_meme ? '🐸 Meme' : '🪙 Altcoin'}</td>
+                                <td class="px-6 py-4 font-mono text-slate-300">$${parseFloat(c.last_price).toFixed(6)}</td>
+                                <td class="px-6 py-4 font-mono ${scoreColor}">${score}/100</td>
+                                <td class="px-6 py-4">${getStatusBadge(c.status)}</td>
+                                <td class="px-6 py-4 text-slate-500">${formatTime(c.first_seen_at)}</td>
+                            </tr>
+                        `;
+                    }
+                });
+
+                document.getElementById('stat-total').innerText = data.total;
+                document.getElementById('stat-watch').innerText = watchCount;
+                document.getElementById('stat-armed').innerText = armedCount;
+                document.getElementById('stat-triggered').innerText = triggeredCount;
+
+                if(tableHtml === '') {
+                    tableHtml = `<tr><td colspan="6" class="px-6 py-8 text-center text-slate-500">Scanning LBank catalog... no targets active.</td></tr>`;
+                }
+
+                document.getElementById('targets-table').innerHTML = tableHtml;
+                document.getElementById('last-update-time').innerText = 'Last updated: ' + new Date().toLocaleTimeString();
+
+            } catch (error) {
+                console.error("Failed to fetch data:", error);
+            }
+        }
+
+        fetchDashboardData();
+        setInterval(fetchDashboardData, 2000);
+    </script>
+</body>
+</html>

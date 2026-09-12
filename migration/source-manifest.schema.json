@@ -1,0 +1,261 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/cavack/WFH-ORG/migration/source-manifest.schema.json",
+  "title": "WFH-ORG migration source manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "generated_at",
+    "sources",
+    "fix_inputs",
+    "files"
+  ],
+  "properties": {
+    "schema_version": {
+      "enum": [
+        1,
+        2
+      ]
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/source"
+      }
+    },
+    "fix_inputs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/fixInput"
+      }
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/file"
+      }
+    },
+    "target_files": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/targetFile"
+      }
+    }
+  },
+  "$defs": {
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repo",
+        "sha",
+        "file_count",
+        "role"
+      ],
+      "properties": {
+        "repo": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "file_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "role": {
+          "enum": [
+            "primary",
+            "dr"
+          ]
+        }
+      }
+    },
+    "fixInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repo",
+        "kind",
+        "number",
+        "head_sha",
+        "purpose"
+      ],
+      "properties": {
+        "repo": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "const": "pull_request"
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "head_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "purpose": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_repo",
+        "source_sha",
+        "source_path",
+        "source_blob_sha",
+        "mode",
+        "disposition",
+        "destination_path",
+        "rationale",
+        "verification"
+      ],
+      "properties": {
+        "source_repo": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "source_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_blob_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "mode": {
+          "type": "string",
+          "pattern": "^[0-9]{6}$"
+        },
+        "disposition": {
+          "enum": [
+            "UNREVIEWED",
+            "KEEP",
+            "FIX_FIRST",
+            "SUPERSEDED",
+            "DROP",
+            "QUARANTINE"
+          ]
+        },
+        "destination_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1
+        },
+        "verification": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "targetFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "blob_sha",
+        "mode",
+        "disposition",
+        "origin",
+        "source_refs",
+        "rationale",
+        "verification"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "blob_sha": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "mode": {
+          "type": "string",
+          "pattern": "^[0-9]{6}$"
+        },
+        "disposition": {
+          "enum": [
+            "KEEP",
+            "FIX_FIRST"
+          ]
+        },
+        "origin": {
+          "enum": [
+            "legacy_unchanged",
+            "legacy_fixed",
+            "migration_generated",
+            "migration_control"
+          ]
+        },
+        "source_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1
+        },
+        "verification": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "schema_version": {
+            "const": 2
+          }
+        },
+        "required": [
+          "schema_version"
+        ]
+      },
+      "then": {
+        "required": [
+          "target_files"
+        ]
+      }
+    }
+  ]
+}

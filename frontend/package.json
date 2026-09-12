@@ -1,0 +1,29 @@
+{
+  "name": "waterfall-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "test:contract": "sh -ec 'rm -rf .test-dist; trap \"rm -rf .test-dist\" EXIT; tsc -p tsconfig.contract-test.json; node .test-dist/tests/dashboard-contract.test.js'",
+    "test:e2e": "npm run build && playwright test",
+    "test:e2e:built": "playwright test"
+  },
+  "dependencies": {
+    "@types/node": "^26.2.0",
+    "@types/react": "^18.3.2",
+    "autoprefixer": "^10.4.19",
+    "lucide-react": "^1.31.0",
+    "next": "16.3.4",
+    "postcss": "^8.4.38",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "tailwindcss": "^3.4.3",
+    "typescript": "^7.0.2"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1"
+  }
+}

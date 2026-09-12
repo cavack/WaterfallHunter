@@ -1,0 +1,66 @@
+# ─── .gitignore ───────────────────────────────────────────────────────────
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+env/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Node.js / Next.js
+node_modules/
+.next/
+out/
+build/
+*.tsbuildinfo
+.npm/
+.pnp.*
+
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+secrets/
+
+# Databases & data
+*.db
+*.sqlite
+*.sqlite3
+data/
+backtest_v2.db
+waterfall_registry.db
+
+# Docker
+.docker/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/
+
+# Runtime
+runtime/
+.tmp/
+tmp/

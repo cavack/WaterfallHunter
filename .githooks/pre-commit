@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+# WFH_EXTERNAL_COMMAND_ALLOWLIST: git mktemp rm python3
+
+ROOT=$(git rev-parse --show-toplevel)
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/wfh-council-precommit.XXXXXX")
+trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+
+git -C "$ROOT" checkout-index --all --prefix="$TMP/"
+cd "$TMP"
+export PYTHONPATH="$TMP:$TMP/backend/src${PYTHONPATH:+:$PYTHONPATH}"
+
+python3 scripts/wfh_council.py validate --json
+python3 scripts/validate_wfh_skills.py

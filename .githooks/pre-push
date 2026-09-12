@@ -1,0 +1,39 @@
+#!/bin/sh
+set -eu
+# WFH_EXTERNAL_COMMAND_ALLOWLIST: git mktemp rm mkdir tar python3
+
+REMOTE_NAME=${1:-origin}
+ROOT=$(git rev-parse --show-toplevel)
+ZERO=0000000000000000000000000000000000000000
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/wfh-council-prepush.XXXXXX")
+trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+COUNT=0
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ -n "${local_sha:-}" ] || continue
+    [ "$local_sha" != "$ZERO" ] || continue
+    COUNT=$((COUNT + 1))
+    CHECKOUT="$TMP/ref-$COUNT"
+    mkdir -p "$CHECKOUT"
+    git -C "$ROOT" archive "$local_sha" | tar -x -C "$CHECKOUT"
+    git -C "$ROOT" ls-tree -r --name-only "$local_sha" > "$CHECKOUT/.wfh-source-manifest"
+
+    (
+        cd "$CHECKOUT"
+        export PYTHONPATH="$CHECKOUT:$CHECKOUT/backend/src${PYTHONPATH:+:$PYTHONPATH}"
+        python3 scripts/wfh_council.py validate --json
+        python3 scripts/validate_wfh_skills.py
+        python3 -m pytest -q backend/tests/test_wfh_council.py backend/tests/test_wfh_council_hooks.py backend/tests/test_wfh_skill_system_v2.py backend/tests/test_chatgpt_project_export.py
+        python3 scripts/verify_repository_hygiene.py --root "$CHECKOUT"
+    )
+    if [ "${remote_sha:-$ZERO}" != "$ZERO" ] \
+        && git -C "$ROOT" cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
+        git -C "$ROOT" diff --check "$remote_sha..$local_sha"
+    else
+        COMMITS=$(git -C "$ROOT" rev-list "$local_sha" --not --remotes="$REMOTE_NAME" 2>/dev/null || true)
+        [ -n "$COMMITS" ] || COMMITS=$local_sha
+        for commit in $COMMITS; do
+            git -C "$ROOT" diff-tree --check --root -r "$commit"
+        done
+    fi
+done

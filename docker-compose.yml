@@ -1,0 +1,280 @@
+services:
+  waterfall-backend:
+    image: waterfallhunter-waterfall-backend
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: waterfall-backend
+    restart: unless-stopped
+    env_file:
+      - ${WFH_ENV_FILE:-.env}
+    environment:
+      # Production invariant: observational execution evidence must survive a
+      # normal base-compose deploy. This worker never places orders or gates
+      # signals; it only refreshes the shadow evidence store.
+      LBANK_EXECUTION_SHADOW_ENABLED: "true"
+      LBANK_EXECUTION_SHADOW_BATCH_SIZE: "8"
+      LBANK_EXECUTION_SHADOW_INTERVAL_SECONDS: "60"
+      LBANK_EXECUTION_SHADOW_SUCCESS_RECHECK_SECONDS: "1800"
+      LBANK_EXECUTION_SHADOW_FAILURE_RECHECK_SECONDS: "600"
+      # Bound glibc arena multiplication in the long-lived multi-exchange worker.
+      MALLOC_ARENA_MAX: "2"
+      # User-authorized, calibration-pending signal discovery. This profile
+      # remains SIGNAL_ONLY and is never allowed to place orders. It stays
+      # opt-in: enable it explicitly in .env after reviewing its calibration
+      # status, instead of every base-compose deploy turning it on.
+      # EXPERIMENTAL_PRETRIGGER_ENABLED: "true"
+      EXPERIMENTAL_PRETRIGGER_THRESHOLD: "45.0"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    volumes:
+      - waterfall_data:/app/data
+    user: "waterfall:waterfall"
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          pids: 100
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/venv/bin/python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    networks:
+      - application
+      - egress
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  frontend:
+    image: waterfallhunter-frontend
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: waterfall-frontend
+    restart: unless-stopped
+    depends_on:
+      waterfall-backend:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3000:3000"
+    read_only: true
+    tmpfs:
+      - /app/.next/cache:rw,noexec,nosuid,nodev,size=64m
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    user: "node:node"
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          pids: 100
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -T 5 -O /dev/null http://127.0.0.1:3000/dashboard/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    networks:
+      - edge
+      - application
+      - egress
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  watchdog:
+    image: waterfallhunter-watchdog
+    build:
+      context: ./watchdog
+      dockerfile: Dockerfile
+    container_name: waterfall-watchdog
+    restart: unless-stopped
+    env_file:
+      - ${WFH_ENV_FILE:-.env}
+    depends_on:
+      waterfall-backend:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m
+    user: "watchdog:watchdog"
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          pids: 50
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/watchdog.heartbeat && test $(( $(date +%s) - $(stat -c %Y /tmp/watchdog.heartbeat) )) -lt 75"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - application
+      - egress
+      - alerting
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  prometheus:
+    image: prom/prometheus@sha256:508729e0e2d18e11fd742a5a5ca70e557b940a93948c3c95fd0123a6fd538b69
+    container_name: waterfall-prometheus
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9090:9090"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    user: "65534:65534"
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          pids: 100
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -T 5 -O /dev/null http://127.0.0.1:9090/-/healthy || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - application
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  grafana:
+    image: grafana/grafana@sha256:d177053ab62253815f130d81504f77063baf5fd4ca93299d6048453bd31e047a
+    container_name: waterfall-grafana
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3001:3000"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m
+      - /var/lib/grafana/plugins:rw,noexec,nosuid,nodev,size=64m
+      - /var/log/grafana:rw,noexec,nosuid,nodev,size=32m
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    user: "472:472"
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          pids: 100
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -T 5 -O /dev/null http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    networks:
+      - edge
+      - application
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  alertmanager:
+    image: prom/alertmanager@sha256:9e082985f56f4c8c9f724e18f2288c6708f472e56a5286b8863d080434ea065d
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m
+    volumes:
+      - ./deploy/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    user: "65534:65534"
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          pids: 50
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -T 5 -O /dev/null http://127.0.0.1:9093/-/healthy || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    depends_on:
+      watchdog:
+        condition: service_healthy
+    networks:
+      egress:
+      application:
+      alerting:
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  waterfall_data:
+  prometheus_data:
+  grafana_data:
+  alertmanager_data:
+
+networks:
+  edge:
+    driver: bridge
+  application:
+    driver: bridge
+    internal: true
+  egress:
+    driver: bridge
+  alerting:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.23.0.0/24

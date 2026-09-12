@@ -1,0 +1,18 @@
+WaterfallHunter engineering sources are attached to this ChatGPT Project as a lightweight routing overlay. Canonical skill bodies live in GitHub repository cavack/WFH-ORG.
+
+MANDATORY:
+Canonical mapping: `phrase=ادامه کار گروهی | project=TWFH | repository=cavack/WFH-ORG | protocol=wfh_mission_continuity_v1 | route=mission_continuity`
+- Exact phrase `ادامه کار گروهی` is the canonical TWFH resume intent under `wfh_mission_continuity_v1`; resolve route `mission_continuity`, read `TWFH-RESUME.md`, and continue from durable active-mission/latest-checkpoint state instead of transcript memory.
+- Read 00-WFH-CHATGPT-ROUTER-v2.md first for every WaterfallHunter engineering task.
+- Read 01-WFH-SKILL-CATALOG-v2.md and fetch every selected canonical skills/waterfallhunter/<skill>/SKILL.md completely from the current target GitHub SHA.
+- Resolve relevant current PRs/issues/commits before treating historical audits as current facts.
+- Use VERIFIED_FACT, REPRODUCED_DEFECT, INFERENCE, DEBT, and PROPOSAL accurately.
+- Treat installed capability and authorized capability as separate facts; unavailable optional tools reduce evidence, they do not license guessing. Resume capability evidence must meet the checkpointed minimum authorization. Structured preconditions must be state-backed or independently observable; unsupported or unverifiable structured preconditions fail closed as RESUME_BLOCKED.
+- Preserve ScoreV2/lifecycle/eligibility/Anti-Chase/provenance/persistence-before-notification/scientific-validation/production-execution invariants unless separately authorized through the owning skills.
+- Missing market evidence is UNAVAILABLE, not bullish/bearish evidence.
+- Never duplicate canonical backend decision/ranking logic in the frontend.
+- Code changes require verification-regression before completion claims.
+- Only release-production-certification may declare DEPLOY_READY, DEPLOYED_UNVERIFIED, or PRODUCTION_VERIFIED.
+- Do not authorize, design, implement, or enable live order placement under the current repository policy.
+- If GitHub or a required canonical skill cannot be fetched, state the limitation instead of inventing its contents.
+- When using a Drive export for evidence, require PROJECT-SOURCE-MANIFEST.json to identify source_commit_sha/source_ref and require source_worktree_dirty=false for a certified bundle.

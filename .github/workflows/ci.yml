@@ -1,0 +1,212 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      deploy_production:
+        description: "Deploy exact CI-tested main revision to Production"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_RUNTIME: "3.13"
+  NODE_RUNTIME: "26"
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: ${{ env.PYTHON_RUNTIME }}
+          cache: pip
+          cache-dependency-path: backend/requirements.lock
+      - run: python -m pip install --upgrade pip
+      - run: "python -m pip install --only-binary=:all: --require-hashes -r backend/requirements.lock"
+      - run: pytest -q backend/tests
+        env:
+          PYTHONPATH: backend/src:.
+          LIVE_TRADING_ENABLED: "false"
+          REGISTRY_DB_PATH: ${{ runner.temp }}/waterfall_registry.db
+      - name: Validate WaterfallHunter engineering skills
+        run: python scripts/validate_wfh_skills.py
+      - run: PYTHONPATH=backend/src:. python scripts/verify_runtime_parity.py
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: ${{ env.NODE_RUNTIME }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run test:contract
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npx --no-install playwright install --with-deps chromium
+      - run: PLAYWRIGHT_PORT=3100 npm run test:e2e:built
+
+  dependency-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: ${{ env.PYTHON_RUNTIME }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: ${{ env.NODE_RUNTIME }}
+      - run: python -m pip install --upgrade pip pip-audit
+      - name: Audit Python dependencies
+        run: |
+          pip-audit --require-hashes -r backend/requirements.lock
+          pip-audit --require-hashes -r watchdog/requirements.lock
+      - run: npm ci
+        working-directory: frontend
+      - run: npm audit --omit=dev --audit-level=high
+        working-directory: frontend
+
+  container-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      tested_backend_image_digest: ${{ steps.tested-artifacts.outputs.backend_digest }}
+      tested_frontend_image_digest: ${{ steps.tested-artifacts.outputs.frontend_digest }}
+      tested_watchdog_image_digest: ${{ steps.tested-artifacts.outputs.watchdog_digest }}
+      tested_image_bundle_sha256: ${{ steps.tested-artifacts.outputs.bundle_sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - run: cp .env.example .env
+      - run: docker compose config --quiet
+      - name: Build revision-labelled production artifacts
+        run: |
+          BUILD_DATE="$(git show -s --format=%cI HEAD)"
+          docker compose build \
+            --build-arg VCS_REF="$GITHUB_SHA" \
+            --build-arg BUILD_DATE="$BUILD_DATE" \
+            --build-arg VERSION="$GITHUB_REF_NAME" \
+            waterfall-backend frontend watchdog
+      - name: Materialize tracked-source manifest for artifact tests
+        run: git ls-files > .wfh-source-manifest
+      - name: Test the exact backend artifact family
+        run: |
+          docker run --rm --read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,size=512m \
+            -e LIVE_TRADING_ENABLED=false \
+            -e REGISTRY_DB_PATH=/tmp/waterfall_registry.db \
+            -e PYTHONPATH=/app/src:/project \
+            -v "$PWD:/project:ro" \
+            -w /project \
+            waterfallhunter-waterfall-backend \
+            pytest -q backend/tests
+      - name: Fresh database migration smoke on exact backend artifact
+        run: |
+          docker run --rm --read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m \
+            -e LIVE_TRADING_ENABLED=false \
+            waterfallhunter-waterfall-backend \
+            python -m waterfallhunter.migrate_database \
+            --db-path /tmp/fresh-install.db --apply --source-revision "$GITHUB_SHA"
+      - name: Record exact tested backend image digest
+        id: tested-artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          TESTED_BACKEND_IMAGE_DIGEST="$(docker image inspect waterfallhunter-waterfall-backend --format '{{.Id}}')"
+          TESTED_FRONTEND_IMAGE_DIGEST="$(docker image inspect waterfallhunter-frontend --format '{{.Id}}')"
+          TESTED_WATCHDOG_IMAGE_DIGEST="$(docker image inspect waterfallhunter-watchdog --format '{{.Id}}')"
+          for digest in "$TESTED_BACKEND_IMAGE_DIGEST" "$TESTED_FRONTEND_IMAGE_DIGEST" "$TESTED_WATCHDOG_IMAGE_DIGEST"; do
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Invalid tested image digest" >&2; exit 1; }
+          done
+          install -d -m 0755 ci-artifacts
+          docker save -o ci-artifacts/wfh-tested-images.tar \
+            waterfallhunter-waterfall-backend \
+            waterfallhunter-frontend \
+            waterfallhunter-watchdog
+          BUNDLE_SHA256="$(sha256sum ci-artifacts/wfh-tested-images.tar | awk '{print $1}')"
+          [[ "$BUNDLE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          printf '%s  %s\n' "$BUNDLE_SHA256" wfh-tested-images.tar > ci-artifacts/wfh-tested-images.tar.sha256
+          cat > ci-artifacts/image-digests.txt <<EOF
+          backend=$TESTED_BACKEND_IMAGE_DIGEST
+          frontend=$TESTED_FRONTEND_IMAGE_DIGEST
+          watchdog=$TESTED_WATCHDOG_IMAGE_DIGEST
+          revision=$GITHUB_SHA
+          EOF
+          echo "WFH_TESTED_BACKEND_IMAGE_DIGEST=$TESTED_BACKEND_IMAGE_DIGEST"
+          echo "WFH_TESTED_FRONTEND_IMAGE_DIGEST=$TESTED_FRONTEND_IMAGE_DIGEST"
+          echo "WFH_TESTED_WATCHDOG_IMAGE_DIGEST=$TESTED_WATCHDOG_IMAGE_DIGEST"
+          echo "WFH_TESTED_IMAGE_BUNDLE_SHA256=$BUNDLE_SHA256"
+          echo "backend_digest=$TESTED_BACKEND_IMAGE_DIGEST" >> "$GITHUB_OUTPUT"
+          echo "frontend_digest=$TESTED_FRONTEND_IMAGE_DIGEST" >> "$GITHUB_OUTPUT"
+          echo "watchdog_digest=$TESTED_WATCHDOG_IMAGE_DIGEST" >> "$GITHUB_OUTPUT"
+          echo "bundle_sha256=$BUNDLE_SHA256" >> "$GITHUB_OUTPUT"
+      - name: Upload exact CI-tested image bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wfh-tested-images-${{ github.sha }}
+          path: ci-artifacts/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Verify OCI revision labels
+        run: |
+          test "$(docker image inspect waterfallhunter-waterfall-backend --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$GITHUB_SHA"
+          test "$(docker image inspect waterfallhunter-frontend --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$GITHUB_SHA"
+          test "$(docker image inspect waterfallhunter-watchdog --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$GITHUB_SHA"
+          test "$(docker run --rm waterfallhunter-waterfall-backend python -c 'from waterfallhunter.config import settings; print(settings.source_revision)')" = "$GITHUB_SHA"
+
+  repository-hygiene:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - name: Reject tracked runtime and secret files
+        shell: bash
+        run: |
+          set -euo pipefail
+          forbidden='(^|/)(\.env|.*\.db|.*\.sqlite3?|.*\.log|.*\.bak|.*\.zip|id_rsa|id_ed25519)$'
+          if git ls-files | grep -E "$forbidden"; then
+            echo "Forbidden runtime/secret-like file is tracked."
+            exit 1
+          fi
+      - name: Scan tracked text for common credential patterns
+        shell: bash
+        run: |
+          set -euo pipefail
+          pattern='(-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|AIza[0-9A-Za-z_-]{30,}|sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,})'
+          if git grep -nEI "$pattern" -- ':!package-lock.json'; then
+            echo "Potential credential found in tracked content."
+            exit 1
+          fi
+      - name: Validate canonical repository hygiene
+        run: python scripts/verify_repository_hygiene.py --root .
+
+  deploy-production:
+    needs:
+      - backend
+      - frontend
+      - dependency-audit
+      - container-validation
+      - repository-hygiene
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.deploy_production == true }}
+    uses: ./.github/workflows/deploy-production.yml
+    with:
+      tested_backend_image_digest: ${{ needs.container-validation.outputs.tested_backend_image_digest }}
+      tested_frontend_image_digest: ${{ needs.container-validation.outputs.tested_frontend_image_digest }}
+      tested_watchdog_image_digest: ${{ needs.container-validation.outputs.tested_watchdog_image_digest }}
+      tested_image_bundle_sha256: ${{ needs.container-validation.outputs.tested_image_bundle_sha256 }}

@@ -1,0 +1,12 @@
+[Unit]
+Description=WaterfallHunter bounded health recovery check
+After=waterfallhunter.service docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/python3 /srv/waterfallhunter/app/scripts/verify_production_cutover.py --health-only --recover --project-dir /srv/waterfallhunter/app --env-file /etc/waterfallhunter/waterfallhunter.env --state-file /srv/waterfallhunter/runtime/healthcheck-state.json
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

@@ -1,0 +1,41 @@
+name: Bug report
+description: Report a reproducible correctness, runtime, data, UI, or documentation defect.
+title: "bug: "
+body:
+  - type: markdown
+    attributes:
+      value: "Do not include credentials, private production data, database copies, or security exploit details. Security issues belong in Private Vulnerability Reporting."
+  - type: dropdown
+    id: classification
+    attributes:
+      label: Classification
+      options: [Correctness, Data, Runtime, Model, Policy, UI, Documentation, Other]
+    validations:
+      required: true
+  - type: input
+    id: revision
+    attributes:
+      label: Exact revision
+      description: Full 40-character commit SHA when known.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction and observed evidence
+      description: Include exact commands, inputs, timestamps/window, and observed result.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety or production impact
+      description: State whether SIGNAL_ONLY, persistence, deployment, notifications, or decision semantics are affected.
+    validations:
+      required: true

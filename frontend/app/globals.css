@@ -1,0 +1,192 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---------------------------------------------------------------------------
+   WaterfallHunter design tokens
+   One dark surface system: layered slate surfaces, a single cyan accent for
+   interactive elements, and semantic colors reserved for state meaning.
+--------------------------------------------------------------------------- */
+:root {
+  --wh-bg: #020617;            /* page background (slate-950) */
+  --wh-surface-1: #0b1220;     /* card surface */
+  --wh-surface-2: #0f1a2e;     /* raised surface / hover */
+  --wh-border: #1e293b;        /* hairline border */
+  --wh-border-strong: #334155;
+  --wh-text: #e2e8f0;
+  --wh-text-dim: #94a3b8;
+  --wh-text-faint: #64748b;
+  --wh-accent: #22d3ee;        /* cyan-400 — links, focus, primary actions */
+  --wh-good: #34d399;
+  --wh-warn: #fbbf24;
+  --wh-bad: #fb7185;
+}
+
+html {
+  scroll-behavior: smooth;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  background:
+    radial-gradient(1100px 500px at 85% -10%, rgb(8 145 178 / 0.08), transparent 60%),
+    radial-gradient(900px 420px at -10% 0%, rgb(139 92 246 / 0.05), transparent 55%),
+    var(--wh-bg);
+  color: var(--wh-text);
+  font-feature-settings: "tnum" 1, "cv02" 1;
+  min-height: 100dvh;
+}
+
+/* Respect users who prefer less motion */
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Visible keyboard focus everywhere */
+:focus-visible {
+  outline: 2px solid var(--wh-accent);
+  outline-offset: 2px;
+  border-radius: 0.5rem;
+}
+
+/* Custom scrollbar (WebKit + Firefox) — subtle, non-intrusive */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #334155 transparent;
+}
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-thumb { background: #334155; border-radius: 9999px; }
+*::-webkit-scrollbar-track { background: transparent; }
+
+/* ---------------------------------------------------------------------------
+   Component classes
+--------------------------------------------------------------------------- */
+@layer components {
+  /* Section card: the standard content container */
+  .panel {
+    border-radius: 1rem;
+    border: 1px solid var(--wh-border);
+    background: linear-gradient(180deg, var(--wh-surface-1), color-mix(in srgb, var(--wh-surface-1) 88%, black));
+    box-shadow: 0 10px 30px -18px rgb(0 0 0 / 0.7);
+  }
+
+  .panel-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }
+
+  /* Small stat block inside panels */
+  .stat {
+    border: 1px solid var(--wh-border);
+    border-radius: 0.75rem;
+    background: rgb(2 6 23 / 0.45);
+    padding: 0.7rem 0.85rem;
+    min-width: 0;
+  }
+  .stat dt {
+    font-size: 0.68rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--wh-text-faint);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .stat dd {
+    margin-top: 0.25rem;
+    font-size: 1.15rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.2;
+    overflow-wrap: anywhere;
+  }
+
+  .status-pill {
+    align-self: flex-start;
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    gap: 0.35rem;
+    justify-content: center;
+    border-radius: 9999px;
+    padding: 0.32rem 0.65rem;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.07em;
+    line-height: 1;
+    white-space: nowrap;
+  }
+
+  /* Legacy names kept so existing components render consistently */
+  .metric-card {
+    border: 1px solid var(--wh-border);
+    border-radius: 0.75rem;
+    background: rgb(2 6 23 / 0.45);
+    padding: 0.75rem;
+    min-width: 0;
+  }
+  .score-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    border: 1px solid var(--wh-border);
+    border-radius: 0.9rem;
+    background: rgb(2 6 23 / 0.5);
+    padding: 1rem;
+  }
+
+  /* Sticky section navigation */
+  .section-nav-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    white-space: nowrap;
+    border-radius: 0.65rem;
+    padding: 0.45rem 0.8rem;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--wh-text-dim);
+    transition: color 120ms ease, background-color 120ms ease;
+  }
+  .section-nav-link:hover { color: #fff; background: rgb(51 65 85 / 0.45); }
+
+  /* Data table shell: horizontal scroll on small screens without page overflow */
+  .table-scroll {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .data-table { width: 100%; min-width: 640px; border-collapse: collapse; text-align: left; font-size: 0.75rem; }
+  .data-table th {
+    position: sticky; top: 0; z-index: 1;
+    background: var(--wh-bg);
+    color: var(--wh-text-faint);
+    font-weight: 500;
+    padding: 0.7rem 1rem;
+    border-bottom: 1px solid var(--wh-border);
+    white-space: nowrap;
+  }
+  .data-table td { padding: 0.7rem 1rem; border-bottom: 1px solid rgb(30 41 59 / 0.6); vertical-align: top; }
+  .data-table tbody tr:hover td { background: rgb(15 26 46 / 0.55); }
+}
+
+/* Pulse used by live indicators — cheap on GPU, disabled under reduced motion */
+@keyframes wh-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+.live-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+  background: var(--wh-good);
+  animation: wh-pulse 1.8s ease-in-out infinite;
+}

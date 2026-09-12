@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "incremental": false,
+    "isolatedModules": false,
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "target": "ES2022",
+    "outDir": ".test-dist",
+    "types": [
+      "node"
+    ]
+  },
+  "include": [
+    "lib/dashboard-contract.ts",
+    "generated/dashboard-contract.ts",
+    "tests/dashboard-contract.test.ts"
+  ]
+}

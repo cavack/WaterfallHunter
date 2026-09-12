@@ -1,0 +1,405 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 027
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+RUNNER_USER="wfh-deploy"
+REPOSITORY="cavack/WFH-ORG"
+RUNNER_ROOT="/var/lib/wfh-github-runner"
+DEPLOY_ROOT="/srv/waterfallhunter/app"
+RUNTIME_ROOT="/srv/waterfallhunter/runtime"
+RECOVERY_REPORT="${RUNTIME_ROOT}/state/release-recovery-gate.json"
+BOUNDARY_REVISION="/etc/waterfallhunter/runner-boundary-revision"
+INCOMING_ROOT="${RUNTIME_ROOT}/incoming"
+CANONICAL_ORIGIN="https://github.com/cavack/WFH-ORG.git"
+LEGACY_ORIGIN="https://github.com/cavack/wfh.git"
+
+fail() {
+  printf '[wfh-production-deploy] ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+require_root_boundary() {
+  [[ "${EUID}" -eq 0 ]] || fail "wrapper must run as root"
+  [[ "${SUDO_USER:-}" == "$RUNNER_USER" ]] || fail "caller must be ${RUNNER_USER} through sudo"
+}
+
+require_sha() {
+  [[ "$1" =~ ^[0-9a-f]{40}$ ]] || fail "invalid Git SHA"
+}
+
+require_digest() {
+  [[ "$1" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "invalid image digest"
+}
+
+canonical_existing_path() {
+  local value="$1" resolved
+  [[ "$value" = /* ]] || fail "path must be absolute: $value"
+  resolved="$(realpath -e -- "$value")" || fail "path does not exist: $value"
+  [[ "$resolved" == "$value" ]] || fail "path must already be canonical: $value"
+  printf '%s\n' "$resolved"
+}
+
+require_runner_path() {
+  local value="$1"
+  [[ "$value" == "$RUNNER_ROOT"/* ]] || fail "runner path escapes allowed root: $value"
+}
+
+require_root_owned_path() {
+  local value="$1" uid gid mode
+  read -r uid gid mode < <(stat -c '%u %g %a' "$value")
+  [[ "$uid" == "0" && "$gid" == "0" ]] || fail "path must be owned by root: $value"
+  (( (8#$mode & 0022) == 0 )) || fail "path must not be group/world writable: $value"
+}
+
+runner_git() {
+  runuser -u "$RUNNER_USER" -- /usr/bin/git -C "$CHECKOUT" "$@"
+}
+
+verify_current_dispatch_ci() {
+  local run_line run_head run_event run_name run_path run_status run_branch run_repository
+  local required row name job_id status conclusion container_job_id=""
+  local -a job_rows matches
+
+  run_line="$(
+    gh api "repos/${REPOSITORY}/actions/runs/${RUN_ID}" \
+      --jq '[.head_sha,.event,.name,.path,.status,.head_branch,.head_repository.full_name] | @tsv'
+  )" || fail "current dispatch run metadata is unavailable"
+  IFS=$'\t' read -r run_head run_event run_name run_path run_status run_branch run_repository \
+    <<<"$run_line"
+  [[ "$run_head" == "$SHA" ]] || fail "dispatch run revision mismatch"
+  [[ "$run_event" == "workflow_dispatch" ]] || fail "deployment run is not an explicit dispatch"
+  [[ "$run_name" == "CI" ]] || fail "deployment run is not the canonical CI workflow"
+  [[ "$run_path" == ".github/workflows/ci.yml" ]] || fail "deployment run path mismatch"
+  [[ "$run_status" == "in_progress" ]] || fail "deployment run is not in progress"
+  [[ "$run_branch" == "main" ]] || fail "deployment run is not on main"
+  [[ "$run_repository" == "$REPOSITORY" ]] || fail "deployment run repository mismatch"
+
+  mapfile -t job_rows < <(
+    gh api "repos/${REPOSITORY}/actions/runs/${RUN_ID}/jobs?per_page=100" \
+      --jq '.jobs[] | [.name,.id,.status,.conclusion] | @tsv'
+  )
+  for required in backend frontend dependency-audit container-validation repository-hygiene; do
+    matches=()
+    for row in "${job_rows[@]}"; do
+      IFS=$'\t' read -r name job_id status conclusion <<<"$row"
+      if [[ "$name" == "$required" ]]; then
+        matches+=("$row")
+      fi
+    done
+    [[ "${#matches[@]}" -eq 1 ]] || fail "required CI job is missing or ambiguous: $required"
+    IFS=$'\t' read -r name job_id status conclusion <<<"${matches[0]}"
+    [[ "$job_id" =~ ^[1-9][0-9]*$ && "$status" == "completed" && "$conclusion" == "success" ]] \
+      || fail "required CI job did not succeed: $required"
+    if [[ "$required" == "container-validation" ]]; then
+      container_job_id="$job_id"
+    fi
+  done
+  [[ -n "$container_job_id" ]] || fail "container-validation job identity unavailable"
+
+  gh api "repos/${REPOSITORY}/actions/jobs/${container_job_id}/logs" \
+    | /usr/bin/python3 -c '
+import re
+import sys
+
+expected = {
+    "WFH_TESTED_BACKEND_IMAGE_DIGEST": sys.argv[1],
+    "WFH_TESTED_FRONTEND_IMAGE_DIGEST": sys.argv[2],
+    "WFH_TESTED_WATCHDOG_IMAGE_DIGEST": sys.argv[3],
+    "WFH_TESTED_IMAGE_BUNDLE_SHA256": sys.argv[4],
+}
+text = sys.stdin.read()
+prefix = r"^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z )?"
+for marker, value in expected.items():
+    matches = re.findall(prefix + re.escape(marker) + r"=([^\r\n]+)\r?$", text, re.MULTILINE)
+    if matches != [value]:
+        raise SystemExit(1)
+' "$BACKEND_DIGEST" "$FRONTEND_DIGEST" "$WATCHDOG_DIGEST" "$BUNDLE_SHA256" \
+    || fail "current dispatch artifact identities are not proven by CI logs"
+}
+
+SHA=""
+RUN_ID=""
+CHECKOUT=""
+BUNDLE=""
+MANIFEST=""
+BUNDLE_SHA256=""
+BACKEND_DIGEST=""
+FRONTEND_DIGEST=""
+WATCHDOG_DIGEST=""
+
+while (($#)); do
+  case "$1" in
+    --sha) SHA="${2:-}"; shift 2 ;;
+    --run-id) RUN_ID="${2:-}"; shift 2 ;;
+    --checkout) CHECKOUT="${2:-}"; shift 2 ;;
+    --bundle) BUNDLE="${2:-}"; shift 2 ;;
+    --manifest) MANIFEST="${2:-}"; shift 2 ;;
+    --bundle-sha256) BUNDLE_SHA256="${2:-}"; shift 2 ;;
+    --backend-digest) BACKEND_DIGEST="${2:-}"; shift 2 ;;
+    --frontend-digest) FRONTEND_DIGEST="${2:-}"; shift 2 ;;
+    --watchdog-digest) WATCHDOG_DIGEST="${2:-}"; shift 2 ;;
+    *) fail "unknown or incomplete argument: $1" ;;
+  esac
+done
+
+require_root_boundary
+require_sha "$SHA"
+[[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]] || fail "invalid GitHub Actions run ID"
+[[ "$BUNDLE_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "invalid bundle SHA-256"
+require_digest "$BACKEND_DIGEST"
+require_digest "$FRONTEND_DIGEST"
+require_digest "$WATCHDOG_DIGEST"
+
+[[ -f "$BOUNDARY_REVISION" && ! -L "$BOUNDARY_REVISION" ]] \
+  || fail "host boundary revision marker is missing or unsafe"
+require_root_owned_path "$BOUNDARY_REVISION"
+[[ "$(<"$BOUNDARY_REVISION")" == "$SHA" ]] \
+  || fail "host boundary was not installed from the target main revision"
+
+CHECKOUT="$(canonical_existing_path "$CHECKOUT")"
+BUNDLE="$(canonical_existing_path "$BUNDLE")"
+MANIFEST="$(canonical_existing_path "$MANIFEST")"
+require_runner_path "$CHECKOUT"
+require_runner_path "$BUNDLE"
+require_runner_path "$MANIFEST"
+[[ -d "$CHECKOUT/.git" ]] || fail "runner checkout is not a normal Git checkout"
+[[ -f "$BUNDLE" && ! -L "$BUNDLE" ]] || fail "bundle must be a regular non-symlink file"
+[[ -f "$MANIFEST" && ! -L "$MANIFEST" ]] || fail "manifest must be a regular non-symlink file"
+
+actual_origin="$(runner_git remote get-url origin)"
+case "$actual_origin" in
+  https://github.com/cavack/WFH-ORG|https://github.com/cavack/WFH-ORG.git) ;;
+  *) fail "runner checkout origin is not cavack/WFH-ORG" ;;
+esac
+[[ "$(runner_git rev-parse HEAD)" == "$SHA" ]] || fail "runner checkout HEAD mismatch"
+[[ -z "$(runner_git status --porcelain --untracked-files=all)" ]] || fail "runner checkout is not clean"
+runner_git fetch --no-tags origin main >/dev/null
+[[ "$(runner_git rev-parse origin/main)" == "$SHA" ]] || fail "runner checkout is not current main"
+
+require_root_owned_path "${RUNTIME_ROOT}/state"
+origin_switched=0
+old_origin=""
+manifest_snapshot="$(mktemp "${RUNTIME_ROOT}/state/.image-digests.XXXXXX")"
+staged_bundle=""
+staged_bundle_tmp=""
+staged_deploy_script=""
+restore_origin_on_failure() {
+  local code=$?
+  if [[ -n "$manifest_snapshot" && -f "$manifest_snapshot" ]]; then
+    rm -f -- "$manifest_snapshot"
+  fi
+  if [[ -n "$staged_bundle_tmp" && -f "$staged_bundle_tmp" ]]; then
+    rm -f -- "$staged_bundle_tmp"
+  fi
+  if [[ -n "$staged_deploy_script" && -f "$staged_deploy_script" ]]; then
+    rm -f -- "$staged_deploy_script"
+  fi
+  if (( code != 0 )) && [[ -n "$staged_bundle" && -f "$staged_bundle" ]]; then
+    rm -f -- "$staged_bundle"
+  fi
+  if (( code != 0 && origin_switched == 1 )); then
+    if ! git -C "$DEPLOY_ROOT" remote set-url origin "$old_origin" >/dev/null 2>&1; then
+      printf '[wfh-production-deploy] ERROR: failed to restore previous Production origin\n' >&2
+    fi
+  fi
+  exit "$code"
+}
+trap restore_origin_on_failure EXIT
+
+runuser -u "$RUNNER_USER" -- /bin/cat -- "$MANIFEST" >"$manifest_snapshot" \
+  || fail "unable to snapshot manifest as runner user"
+chmod 0400 "$manifest_snapshot"
+MANIFEST="$manifest_snapshot"
+[[ "$(grep -Fxc "backend=$BACKEND_DIGEST" "$MANIFEST")" -eq 1 ]] \
+  || fail "backend digest manifest mismatch"
+[[ "$(grep -Fxc "frontend=$FRONTEND_DIGEST" "$MANIFEST")" -eq 1 ]] \
+  || fail "frontend digest manifest mismatch"
+[[ "$(grep -Fxc "watchdog=$WATCHDOG_DIGEST" "$MANIFEST")" -eq 1 ]] \
+  || fail "watchdog digest manifest mismatch"
+[[ "$(grep -Fxc "revision=$SHA" "$MANIFEST")" -eq 1 ]] \
+  || fail "revision manifest mismatch"
+[[ "$(wc -l < "$MANIFEST")" -eq 4 ]] || fail "image digest manifest has unexpected entries"
+
+verify_current_dispatch_ci
+
+[[ -f "$RECOVERY_REPORT" && ! -L "$RECOVERY_REPORT" ]] || fail "recovery report is missing or unsafe"
+read -r report_uid report_gid report_mode < <(stat -c '%u %g %a' "$RECOVERY_REPORT")
+[[ "$report_uid" == "0" && "$report_gid" == "0" && "$report_mode" == "640" ]] \
+  || fail "recovery report ownership/mode must be root:root 0640"
+
+/usr/bin/python3 - "$RECOVERY_REPORT" "$SHA" <<'PY' || exit 1
+import json
+import hashlib
+import hmac
+import os
+import sys
+import time
+
+path, expected_sha = sys.argv[1:]
+with open(path, "r", encoding="utf-8") as handle:
+    report = json.load(handle)
+expected_fields = {
+    "contract_version",
+    "evaluated_at",
+    "valid_until",
+    "source_revision",
+    "status",
+    "blocking_reasons",
+    "trusted_ci_verification_sha256",
+    "trusted_ci_run_id",
+    "tested_backend_image_digest",
+    "backup_certification_sha256",
+    "migration_rehearsal_sha256",
+    "independent_restore_verification_sha256",
+    "independent_restore_run_id",
+    "independent_restore_artifact_id",
+    "independent_restore_workflow_revision",
+    "deployment_allowed",
+    "migration_allowed",
+    "telegram_send_allowed",
+    "feature_promotion_allowed",
+    "live_trading_allowed",
+    "required_next_authority",
+    "report_sha256",
+}
+if not isinstance(report, dict) or set(report) != expected_fields:
+    print("[wfh-production-deploy] ERROR: recovery report schema mismatch", file=sys.stderr)
+    raise SystemExit(1)
+
+def require_ascii_json(value):
+    if value is None or type(value) in (bool, int):
+        return
+    if isinstance(value, str):
+        value.encode("ascii")
+        return
+    if isinstance(value, list):
+        for item in value:
+            require_ascii_json(item)
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key.encode("ascii")
+            require_ascii_json(item)
+        return
+    raise TypeError("recovery report contains unsupported JSON value")
+
+try:
+    require_ascii_json(report)
+    supplied_hash = report["report_sha256"]
+    body = {key: value for key, value in report.items() if key != "report_sha256"}
+    canonical = json.dumps(
+        body,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    expected_hash = hashlib.sha256(canonical).hexdigest()
+except (KeyError, TypeError, UnicodeEncodeError, ValueError) as error:
+    print(f"[wfh-production-deploy] ERROR: invalid recovery report: {error}", file=sys.stderr)
+    raise SystemExit(1)
+if not isinstance(supplied_hash, str) or not hmac.compare_digest(supplied_hash, expected_hash):
+    print("[wfh-production-deploy] ERROR: recovery report canonical hash mismatch", file=sys.stderr)
+    raise SystemExit(1)
+checks = [
+    (report.get("contract_version") == "release_recovery_gate_report_v1", "recovery contract mismatch"),
+    (report.get("status") == "READY_FOR_EXPLICIT_DISPATCH", "recovery report is not READY"),
+    (report.get("blocking_reasons") == [], "recovery report has blocking reasons"),
+    (report.get("source_revision") == expected_sha, "recovery report revision mismatch"),
+    (report.get("required_next_authority") == "EXPLICIT_WORKFLOW_DISPATCH", "recovery authority mismatch"),
+    (type(report.get("valid_until")) is int, "recovery validity is missing"),
+    (type(report.get("evaluated_at")) is int, "recovery evaluation time is missing"),
+    (
+        all(report.get(field) is False for field in (
+            "deployment_allowed",
+            "migration_allowed",
+            "telegram_send_allowed",
+            "feature_promotion_allowed",
+            "live_trading_allowed",
+        )),
+        "recovery report safety boundary mismatch",
+    ),
+]
+for ok, message in checks:
+    if not ok:
+        print(f"[wfh-production-deploy] ERROR: {message}", file=sys.stderr)
+        raise SystemExit(1)
+if report["valid_until"] - int(time.time()) < 300:
+    print("[wfh-production-deploy] ERROR: recovery report has less than 300 seconds remaining", file=sys.stderr)
+    raise SystemExit(1)
+PY
+
+DEPLOY_ROOT="$(canonical_existing_path "$DEPLOY_ROOT")"
+[[ -d "$DEPLOY_ROOT/.git" && ! -L "$DEPLOY_ROOT/.git" ]] \
+  || fail "Production deploy root is not a safe Git checkout"
+require_root_owned_path "$DEPLOY_ROOT"
+require_root_owned_path "$DEPLOY_ROOT/.git"
+[[ -z "$(git -C "$DEPLOY_ROOT" status --porcelain --untracked-files=all)" ]] \
+  || fail "Production deploy root is not clean"
+old_origin="$(git -C "$DEPLOY_ROOT" remote get-url origin)"
+case "$old_origin" in
+  "$LEGACY_ORIGIN"|https://github.com/cavack/wfh|"$CANONICAL_ORIGIN"|https://github.com/cavack/WFH-ORG) ;;
+  *) fail "Production origin is neither the certified legacy repo nor WFH-ORG" ;;
+esac
+
+if [[ "$old_origin" != "$CANONICAL_ORIGIN" ]]; then
+  git -C "$DEPLOY_ROOT" remote set-url origin "$CANONICAL_ORIGIN"
+  origin_switched=1
+fi
+
+git -C "$DEPLOY_ROOT" fetch --no-tags origin main >/dev/null
+git -C "$DEPLOY_ROOT" cat-file -e "${SHA}^{commit}" \
+  || fail "target revision is unavailable in the root-owned Production repository"
+[[ "$(git -C "$DEPLOY_ROOT" rev-parse origin/main)" == "$SHA" ]] \
+  || fail "target revision is not current WFH-ORG main"
+
+incoming_dir="${INCOMING_ROOT}/${SHA}"
+[[ ! -L "$incoming_dir" ]] || fail "incoming path must not be a symlink"
+install -d -o root -g root -m 0750 "$incoming_dir"
+staged_bundle="${incoming_dir}/wfh-tested-images.tar"
+staged_bundle_tmp="$(mktemp "${incoming_dir}/.wfh-tested-images.XXXXXX")"
+runuser -u "$RUNNER_USER" -- /bin/cat -- "$BUNDLE" >"$staged_bundle_tmp" \
+  || fail "unable to snapshot CI bundle as runner user"
+chmod 0640 "$staged_bundle_tmp"
+[[ "$(sha256sum "$staged_bundle_tmp" | awk '{print $1}')" == "$BUNDLE_SHA256" ]] \
+  || fail "staged bundle SHA-256 mismatch"
+mv -- "$staged_bundle_tmp" "$staged_bundle"
+staged_bundle_tmp=""
+
+staged_deploy_script="$(mktemp "${RUNTIME_ROOT}/state/.deploy-production.XXXXXX")"
+git -C "$DEPLOY_ROOT" show "${SHA}:scripts/deploy_production.sh" >"$staged_deploy_script" \
+  || fail "canonical deploy script is unavailable at target revision"
+expected_script_blob="$(git -C "$DEPLOY_ROOT" rev-parse "${SHA}:scripts/deploy_production.sh")"
+[[ "$(git hash-object "$staged_deploy_script")" == "$expected_script_blob" ]] \
+  || fail "staged canonical deploy script blob mismatch"
+chown root:root "$staged_deploy_script"
+chmod 0500 "$staged_deploy_script"
+require_root_owned_path "$staged_deploy_script"
+
+set +e
+env \
+  WFH_DEPLOY_SHA="$SHA" \
+  WFH_DEPLOY_ROOT="$DEPLOY_ROOT" \
+  WFH_TESTED_IMAGE_BUNDLE="$staged_bundle" \
+  WFH_TESTED_IMAGE_BUNDLE_SHA256="$BUNDLE_SHA256" \
+  WFH_TESTED_BACKEND_IMAGE_DIGEST="$BACKEND_DIGEST" \
+  WFH_TESTED_FRONTEND_IMAGE_DIGEST="$FRONTEND_DIGEST" \
+  WFH_TESTED_WATCHDOG_IMAGE_DIGEST="$WATCHDOG_DIGEST" \
+  bash "$staged_deploy_script" </dev/null
+code=$?
+set -e
+
+if (( code != 0 )); then
+  fail "canonical deployment failed with exit code ${code}"
+fi
+
+rm -f -- "$staged_deploy_script"
+staged_deploy_script=""
+rm -f -- "$manifest_snapshot"
+manifest_snapshot=""
+staged_bundle=""
+origin_switched=0
+trap - EXIT
+printf '[wfh-production-deploy] deployment wrapper completed for %s\n' "$SHA"
