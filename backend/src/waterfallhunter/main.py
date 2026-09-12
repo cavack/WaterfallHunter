@@ -1104,6 +1104,173 @@ def _build_entry_notification_worker() -> DurableNotificationWorker | None:
     )
 
 
+
+# ─── Per-Signal Backtest Recorder ─────────────────────────────────────────
+# Records each ENTRY_READY signal: entry, exit, and result (win/loss/timeout)
+
+_backtest_active_trades: dict[str, dict] = {}  # symbol -> trade info
+
+def _start_backtest_trade(symbol: str, metrics: dict, decision: dict) -> None:
+    """Start tracking a backtest trade for an ENTRY_READY signal."""
+    try:
+        import sqlite3, time
+        signal = metrics.get("signal_summary") or {}
+        entry_price = float(signal.get("entry_price") or decision.get("entry_price") or 0)
+        stop_loss = float(signal.get("stop_loss") or decision.get("stop_loss") or 0)
+        tp1 = float(signal.get("take_profit") or signal.get("take_profit_1") or 0)
+        tp2 = float(signal.get("take_profit_2") or 0)
+        score = float(metrics.get("readiness_score") or 0)
+        
+        if entry_price <= 0 or stop_loss <= 0 or tp1 <= 0:
+            return
+        
+        # Determine leverage based on score
+        if score >= 80:
+            leverage = 14
+        elif score >= 70:
+            leverage = 12
+        elif score >= 55:
+            leverage = 8
+        else:
+            leverage = 4
+        
+        # Position size: 30% of $100 capital
+        capital = 100.0
+        position_usd = capital * 0.30
+        shares = position_usd * leverage / entry_price
+        
+        trade = {
+            "symbol": symbol,
+            "entry_time": time.time(),
+            "entry_price": entry_price,
+            "stop_loss": stop_loss,
+            "tp1": tp1,
+            "tp2": tp2,
+            "leverage": leverage,
+            "position_usd": position_usd,
+            "shares": shares,
+            "score": score,
+            "outcome": None,
+        }
+        _backtest_active_trades[symbol] = trade
+        logger.info("Backtest trade STARTED for %s: entry=%.6f SL=%.6f TP1=%.6f TP2=%.6f lev=%dx",
+                    symbol, entry_price, stop_loss, tp1, tp2, leverage)
+    except Exception as exc:
+        logger.warning("Backtest start failed for %s: %s", symbol, exc)
+
+
+def _check_backtest_trades(metrics_by_symbol: dict) -> None:
+    """Check active backtest trades against current prices — record exits."""
+    try:
+        import sqlite3, time
+        if not _backtest_active_trades:
+            return
+        
+        bt_db = sqlite3.connect("/app/data/backtest_v2.db")
+        bc = bt_db.cursor()
+        
+        # Ensure table exists
+        bc.execute("""
+            CREATE TABLE IF NOT EXISTS bt_v2_trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT,
+                entry_time TEXT,
+                exit_time TEXT,
+                entry_price REAL,
+                exit_price REAL,
+                pnl_pct REAL,
+                pnl_usd REAL,
+                outcome TEXT,
+                leverage INTEGER,
+                position_size_usd REAL,
+                shares_traded REAL,
+                signal_data TEXT
+            )
+        """)
+        
+        for symbol, trade in list(_backtest_active_trades.items()):
+            metrics = metrics_by_symbol.get(symbol, {})
+            signal = metrics.get("signal_summary") or {}
+            current_price = float(signal.get("current_price") or metrics.get("current_price") or 0)
+            
+            if current_price <= 0:
+                continue
+            
+            entry = trade["entry_price"]
+            sl = trade["stop_loss"]
+            tp1 = trade["tp1"]
+            tp2 = trade["tp2"]
+            lev = trade["leverage"]
+            shares = trade["shares"]
+            
+            outcome = None
+            exit_price = current_price
+            
+            # Short trades (entry > TP, SL > entry)
+            if tp1 < entry:  # Short
+                if current_price <= tp2:
+                    outcome = "win_tp2"
+                    exit_price = tp2
+                elif current_price <= tp1:
+                    outcome = "win_tp1"
+                    exit_price = tp1
+                elif current_price >= sl:
+                    outcome = "loss_sl"
+                    exit_price = sl
+            else:  # Long
+                if current_price >= tp2:
+                    outcome = "win_tp2"
+                    exit_price = tp2
+                elif current_price >= tp1:
+                    outcome = "win_tp1"
+                    exit_price = tp1
+                elif current_price <= sl:
+                    outcome = "loss_sl"
+                    exit_price = sl
+            
+            # Check timeout (24 hours)
+            if outcome is None and (time.time() - trade["entry_time"]) > 86400:
+                outcome = "timeout"
+            
+            if outcome is not None:
+                # Calculate PnL
+                if outcome == "timeout":
+                    pnl_pct = 0.0
+                    pnl_usd = 0.0
+                elif outcome.startswith("win"):
+                    pnl_pct = ((entry - exit_price) / entry) * lev * 100 if tp1 < entry else ((exit_price - entry) / entry) * lev * 100
+                    pnl_usd = trade["position_usd"] * (pnl_pct / 100)
+                else:  # loss_sl
+                    pnl_pct = ((exit_price - entry) / entry) * lev * 100 if tp1 < entry else ((entry - exit_price) / entry) * lev * 100
+                    pnl_pct = -abs(pnl_pct)
+                    pnl_usd = trade["position_usd"] * (pnl_pct / 100)
+                
+                # Record trade
+                from datetime import datetime, timezone
+                entry_dt = datetime.fromtimestamp(trade["entry_time"], tz=timezone.utc).isoformat()
+                exit_dt = datetime.now(timezone.utc).isoformat()
+                
+                bc.execute("""
+                    INSERT INTO bt_v2_trades 
+                    (symbol, entry_time, exit_time, entry_price, exit_price, pnl_pct, pnl_usd, outcome, leverage, position_size_usd, shares_traded, signal_data)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    symbol, entry_dt, exit_dt, entry, exit_price,
+                    pnl_pct, pnl_usd, outcome, lev, trade["position_usd"], shares,
+                    f'{{"score": {trade["score"]}, "outcome_status": "{outcome}", "strategy": "tp2"}}'
+                ))
+                bt_db.commit()
+                
+                logger.info("Backtest trade CLOSED for %s: outcome=%s pnl=%.2f%% $%.2f",
+                            symbol, outcome, pnl_pct, pnl_usd)
+                
+                del _backtest_active_trades[symbol]
+        
+        bt_db.close()
+    except Exception as exc:
+        logger.warning("Backtest check failed: %s", exc)
+
+
 async def _entry_notification_loop(interval_seconds: float = 0.5) -> None:
     while _hunter_running:
         worker = _entry_notification_worker
@@ -2105,7 +2272,7 @@ def _restore_persisted_decision_projection(
     if isinstance(event_id, int) and not isinstance(event_id, bool) and event_id > 0:
         current_decision["event_id"] = event_id
         current_decision["event_persisted"] = False
-    if current_decision.get("decision") in ("ENTRY_READY", "FORMING"):
+    if current_decision.get("decision") == "ENTRY_READY":
         persisted_plan = persisted_decision.get("trade_plan")
         if isinstance(persisted_plan, dict):
             current_decision["trade_plan"] = dict(persisted_plan)
@@ -3424,6 +3591,12 @@ async def evaluate_candidate(
             persisted_decision,
         )
     result_metrics["entry_decision"] = entry_decision
+
+    # ── Per-signal backtest: start trade on ENTRY_READY ──
+    if entry_decision.get("decision") == "ENTRY_READY":
+        _start_backtest_trade(symbol, result_metrics, entry_decision)
+    # ── Per-signal backtest: check active trades ──
+    _check_backtest_trades({symbol: result_metrics})
 
     try:
         technical_trade_plan_shadow = validator.build_technical_trade_plan_shadow(
