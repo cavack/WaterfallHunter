@@ -6,6 +6,36 @@ This ledger records externally meaningful model, decision, evidence, runtime, UI
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 2026-09-01 | `2bb9feafc6a9bf6495a84b7dd58693f5491aa7a0` | [#102](https://github.com/cavack/wfh/pull/102) | Entry Decision / Anti-Chase | Any extension at or above `1.2 ATR` was inserted as an initial hard blocker and forced `LATE`, including readiness below `55` and stale evidence; the resulting same-lifecycle `LATE` projection was sticky. | Freshness and deterministic blockers are resolved first; Anti-Chase converts only otherwise `FORMING`, `ENTRY_READY`, or `ACTIVE` evidence to `LATE`; lifecycle `EXHAUSTED` remains terminal `LATE` even when other inputs are blocked; measured extension still records its Anti-Chase blocker; new terminal packets record `late_origin` separately from the current `lifecycle_state`; lifecycle/origin/blocker changes are material persisted events; only impossible pre-provenance legacy low-readiness, non-`EXHAUSTED`, Anti-Chase-only projections can recover. Calibration remains `78` / `55` / `1.2 ATR`. | Production funnel showed a systemic `LATE` projection inconsistent with the documented decision geometry. | CORRECTNESS | Remove false `LATE` inflation without increasing readiness, weakening Anti-Chase, or creating an actionable signal. | Deterministic RED: initial defect `3 failed, 25 passed`; first review regressions `2 failed, 28 passed`; repeated-provenance/extension regressions `2 failed, 29 passed`; decision/transition/store/freshness/repository-contract selection `73 passed`; full backend suite `1228 passed` with only the existing Starlette deprecation plus read-only pytest-cache warning in the local artifact harness. The correction is present in the current Production lineage (`1e71b92ca3ba32c55ab6d8ab5de7ce93473c0a69` contains the canonical merge); later release/runtime certification is healthy, while isolated funnel attribution to this correction is not claimed. | `test_entry_decision.py`, `test_entry_decision_store.py`, `test_stale_trigger_safety.py`, `test_decision_terminal.py`, `test_repository_canonicalization.py` | Read-only Production snapshot: 160 candidates, 144 `LATE`, 16 `NO_TRADE`, 0 `FORMING`, 0 `ENTRY_READY`; 144 Anti-Chase blockers. Kernel/runtime evidence is tracked separately because OOM/freshness remain independent defects. | `PRODUCTION_VERIFIED` | Revert canonical commit `2bb9feafc6a9bf6495a84b7dd58693f5491aa7a0` only through the normal protected/release path if this correction itself must be rolled back; no schema migration or calibration rollback is required. |
 
+| 2026-09-15 | `da7c86c` | _(direct to `main`)_ | Entry Decision / Fail-closed contract + unrecorded calibration | `_base_decision` advertised `ENTRY_READY` while the same packet carried `hard_blocked=True`. `STALE_ANALYSIS`, `STALE_REFERENCE`, `EXECUTION_UNAVAILABLE`, `DETERMINISTIC_MARKET_DATA_VETO` and `TRADE_PLAN_EXPIRED` had been downgraded from hard blocks to scoring penalties; `anti_chase_late`, `timing_ok`, `execution_ok` and `cross_ok` were accepted as parameters but never read (each appeared exactly once in the function body - the signature). Telegram `_get_signals` selected on `decision == ENTRY_READY` and never inspected `hard_blocked`, and `telegram_signal_delivery_enabled` defaulted to `True`. | The five blockers are hard `NO_TRADE` again; anti-chase classifies as `LATE` after freshness is resolved, preserving the documented ordering; `timing_ok`/`execution_ok`/`cross_ok` are back inside `gates_pass`; `_get_signals` refuses hard-blocked packets as defence in depth; the Telegram delivery default is `False` (opt-in via env). Calibration itself is **unchanged**: the shipped policy remains `entry_policy_v2_calibrated` (`70` / `55` / `2.5 ATR` / `600s`). | A packet cannot be simultaneously actionable and hard-blocked. Verified on the deployed tree before the fix: all three blockers set, `anti_chase_late=True`, `timing/execution/cross=False` still returned `ENTRY_READY`, and that packet was eligible for Telegram delivery with `TELEGRAM_SIGNAL_DELIVERY_ENABLED=true` in the runtime env. | CORRECTNESS | Remove contradictory actionable packets and close the delivery path for hard-blocked evidence. No change to readiness scoring or thresholds, so the ENTRY_READY rate for genuinely clean setups is expected to be unaffected. | Not yet measured over a bounded observation window. Deployed 2026-09-15T17:20Z as `wfh-release-backend:failclosed-20260915T172002`. | `test_entry_decision.py`: `22 passed, 12 xfailed` (was `10 passed, 24 failed` both before and after the engine fix - see below). | Read-only production evidence, `entry_decision_events`, 693,151 rows. `entry_policy_v1` (2026-08-29..09-12, n=417,125): 0 `ENTRY_READY`, 385,445 `LATE` (92.4%), 40 `FORMING`. `entry_policy_v2_calibrated` (2026-09-12..09-15, n=276,421): 1,646 `ENTRY_READY` (0.596%), 30,615 `FORMING`, 2,959 `LATE`. Readiness `>= 78` occurred once in 276k v2 evaluations; all actionable signals came from the 70-77.9 band. | `DEPLOYED_UNVERIFIED` | Revert `da7c86c` and repoint `/srv/waterfallhunter/runtime/production-images.override.yml` at `wfh-release-backend:a744d683ebdcdcabed3626a0c5f9b28c1dbec765`. No schema migration or calibration rollback is involved. |
+
+### Open: unrecorded calibration drift (`78 / 1.2 ATR / 180s` vs `70 / 2.5 ATR / 600s`)
+
+`docs/DECISION_ENGINE.md` and the 2026-09-01 row above describe the calibration
+as `ENTRY_READY >= 78`, anti-chase at `1.2 ATR`, and a 180s freshness budget,
+recorded `PRODUCTION_VERIFIED`. The shipped `EntryDecisionPolicy` is
+`entry_policy_v2_calibrated`: `70` / `55` / `2.5 ATR` / `600s`.
+
+No ledger row records that transition. The defaults changed inside commits whose
+stated subject was something else - `c7b64b2` ("clean standard repo",
+`entry_ready_minimum` 78 -> 70) and `597ba7f` ("FORMING Telegram delivery",
+`max_analysis_age_seconds` -> 600) - so the tests and documentation kept
+asserting the older contract.
+
+Production data argues against simply restoring the documented numbers:
+`entry_policy_v1` produced **zero** `ENTRY_READY` decisions across 417,125
+evaluations while marking 92.4% of them `LATE`. It also argues against blessing
+the current numbers by editing the tests: readiness `>= 78` occurred exactly
+once in 276k `v2` evaluations, so every actionable signal depends on a 70-77.9
+band that no replay or holdout has validated.
+
+The twelve affected tests in `backend/tests/test_entry_decision.py` are marked
+`xfail(strict=True)` with this reason rather than rewritten or deleted, so the
+documented contract stays executable and the divergence stays visible. Strict
+mode means they fail as `XPASS` the moment code and documentation agree again.
+
+Closing this requires a replay/walk-forward study that selects thresholds on
+evidence, followed by a ledger row here and removal of the `xfail` markers.
+
 ## Status vocabulary
 
 - `CODE_READY_NOT_DEPLOYED`: implementation and focused evidence exist, but exact-head CI/review/release gates are incomplete.
