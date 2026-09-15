@@ -94,7 +94,9 @@ DEFAULT_TIMEOUT: float = 15.0  # per-request timeout in seconds
 
 # API base URLs
 DEXSCREENER_BASE = "https://api.dexscreener.com/latest/dex/tokens"
+DEXSCREENER_SEARCH = "https://api.dexscreener.com/latest/dex/search"
 COINGECKO_BASE = "https://api.coingecko.com/api/v3/coins/markets"
+COINGECKO_SEARCH = "https://api.coingecko.com/api/v3/search"
 LUNARCRUSH_BASE = "https://lunarcrush.com/api4/public/coins"
 NITTER_SEARCH_URL = "https://nitter.net/search"
 TWITTER_API_BASE = "https://api.twitter.com/2/tweets/search/recent"
@@ -326,11 +328,25 @@ class DexScreenerFetcher(_BaseFetcher):
     source_name = "dexscreener"
 
     async def fetch(self, token: TokenInfo) -> dict[str, Any]:
-        if not token.token_address:
-            raise ValueError("DexScreener requires a token_address in token_map")
-
-        url = f"{DEXSCREENER_BASE}/{token.token_address}"
-        json_data = await self._get_json(url)
+        if token.token_address:
+            json_data = await self._get_json(
+                f"{DEXSCREENER_BASE}/{token.token_address}"
+            )
+        else:
+            # LBank futures symbols do not carry an on-chain address. Resolve
+            # only a pair whose *base token symbol* exactly matches; selecting
+            # a loose text-search result is how e.g. "PEPE" becomes an
+            # unrelated imitation token. This is observational evidence, so
+            # ambiguous/missing resolution is preferable to invented data.
+            search = await self._get_json(DEXSCREENER_SEARCH, params={"q": token.symbol})
+            matches = [
+                pair for pair in (search.get("pairs") or [])
+                if str((pair.get("baseToken") or {}).get("symbol") or "").upper()
+                == token.symbol.upper()
+            ]
+            if not matches:
+                raise ValueError("DexScreener exact symbol resolution unavailable")
+            json_data = {"pairs": matches}
 
         pairs = json_data.get("pairs") or []
         if not pairs:
@@ -407,12 +423,26 @@ class CoinGeckoFetcher(_BaseFetcher):
     source_name = "coingecko"
 
     async def fetch(self, token: TokenInfo) -> dict[str, Any]:
-        if not token.coingecko_id:
-            raise ValueError("CoinGecko requires a coingecko_id in token_map")
+        coingecko_id = token.coingecko_id
+        if not coingecko_id:
+            # CoinGecko search returns canonical ids. Require an exact symbol
+            # match and pick the highest-ranked candidate; we record source
+            # availability rather than pretending a fuzzy result is evidence.
+            search = await self._get_json(COINGECKO_SEARCH, params={"query": token.symbol})
+            matches = [
+                coin for coin in (search.get("coins") or [])
+                if str(coin.get("symbol") or "").upper() == token.symbol.upper()
+            ]
+            if not matches:
+                raise ValueError("CoinGecko exact symbol resolution unavailable")
+            matches.sort(key=lambda coin: int(coin.get("market_cap_rank") or 10**9))
+            coingecko_id = str(matches[0].get("id") or "")
+            if not coingecko_id:
+                raise ValueError("CoinGecko resolved entry missing id")
 
         params = {
             "vs_currency": "usd",
-            "ids": token.coingecko_id,
+            "ids": coingecko_id,
             "sparkline": "false",
             "price_change_percentage": "24h",
         }
@@ -429,7 +459,7 @@ class CoinGeckoFetcher(_BaseFetcher):
         sentiment_up_pct: float | None = None
 
         try:
-            detail_url = f"https://api.coingecko.com/api/v3/coins/{token.coingecko_id}"
+            detail_url = f"https://api.coingecko.com/api/v3/coins/{coingecko_id}"
             detail = await self._get_json(
                 detail_url,
                 params={"localization": "false", "tickers": "false",
@@ -452,6 +482,7 @@ class CoinGeckoFetcher(_BaseFetcher):
             "community_score": community_score,
             "developer_score": developer_score,
             "sentiment_votes_up_pct": sentiment_up_pct,
+            "resolved_coingecko_id": coingecko_id,
         }
 
     def compute_sub_score(self, data: dict[str, Any]) -> float:
@@ -709,6 +740,7 @@ class FundamentalScorer:
         cache_ttl: int = DEFAULT_CACHE_TTL,
         timeout: float = DEFAULT_TIMEOUT,
         enable_cache: bool = True,
+        enabled_sources: tuple[str, ...] | None = None,
     ) -> None:
         api_keys = api_keys or {}
 
@@ -729,6 +761,10 @@ class FundamentalScorer:
         self._timeout = timeout
         self._enable_cache = enable_cache
         self._cache = TTLCache(ttl=cache_ttl)
+        self._enabled_sources = enabled_sources or self.SOURCE_NAMES
+        unknown_sources = set(self._enabled_sources) - set(self.SOURCE_NAMES)
+        if unknown_sources:
+            raise ValueError(f"Unknown fundamental sources: {sorted(unknown_sources)}")
 
         self._client: httpx.AsyncClient | None = None
         self._fetchers: dict[str, _BaseFetcher] = {}
@@ -823,7 +859,7 @@ class FundamentalScorer:
         await self._ensure_client()
 
         # Fetch all sources concurrently — each isolated
-        source_names = list(self._fetchers.keys())
+        source_names = [name for name in self._enabled_sources if name in self._fetchers]
         gathered = await asyncio.gather(
             *[self._fetch_source(name, self._fetchers[name], token) for name in source_names],
             return_exceptions=False,

@@ -44,6 +44,7 @@ from waterfallhunter.core.ai_veto import (
     CANONICAL_ADVISORY_DELIVERY_GRACE_SECONDS,
 )
 from waterfallhunter.core.fundamental_scorer import FundamentalScorer
+from waterfallhunter.core.fundamental_observation_store import FundamentalObservationStore
 from waterfallhunter.core.risk_manager import build_signal_leverage_advisory
 from waterfallhunter.core.dashboard import compact_metrics
 from waterfallhunter.core.decision_terminal import build_decision_terminal
@@ -222,6 +223,7 @@ feature_replay_worker = FeatureReplayWorker(
     feature_replay_store,
     batch_size=3,
 )
+fundamental_observation_store = FundamentalObservationStore(db.db_path)
 
 app.include_router(
     build_execution_suitability_router(
@@ -337,10 +339,18 @@ notifier = TelegramNotifier(
 )
 
 ai_veto = AIVetoEngine()
-fundamental_scorer = FundamentalScorer(api_keys={
-    "lunarcrush": settings.lunarcrush_api_key,
-    "twitter": settings.twitter_bearer_token,
-})
+# Fundamental evidence is deliberately observational. Only the two free,
+# deterministic-ish market-data providers run here; LunarCrush and X/Nitter
+# are not attempted without a paid/keyed integration. It is collected for
+# FORMING/ENTRY_READY candidates only and never enters build_entry_decision.
+fundamental_scorer = FundamentalScorer(
+    weights={"dexscreener": 0.5, "coingecko": 0.5, "lunarcrush": 0.0, "twitter": 0.0},
+    enabled_sources=("dexscreener", "coingecko"),
+    cache_ttl=300,
+    timeout=8.0,
+)
+_fundamental_gate: asyncio.Semaphore | None = None
+_FUNDAMENTAL_MAX_CONCURRENT = 2
 
 
 _hunter_running = False
@@ -1388,6 +1398,59 @@ async def _refresh_canonical_ai_advisory(
         current_metrics["ai_advisory"] = {**existing, **advisory}
     else:
         current_metrics["ai_advisory"] = advisory
+
+
+async def _refresh_observational_fundamental(
+    symbol: str,
+    candidate_token: dict[str, Any],
+    decision_event_id: int,
+) -> None:
+    """Attach free fundamental evidence without affecting the decision.
+
+    This runs after the canonical packet is persisted. It has no score weight,
+    cannot veto, promote or downgrade a decision, and is intentionally limited
+    to two concurrent requests. Its purpose is to build a decision/outcome
+    dataset for a later replay, not to smuggle unvalidated sentiment into the
+    live model.
+    """
+    global _fundamental_gate
+    if _fundamental_gate is None:
+        _fundamental_gate = asyncio.Semaphore(_FUNDAMENTAL_MAX_CONCURRENT)
+    try:
+        async with _fundamental_gate:
+            result = await fundamental_scorer.score(symbol.split("/")[0])
+    except Exception as exc:  # noqa: BLE001
+        logger.info("Observational fundamental unavailable for %s: %s", symbol, type(exc).__name__)
+        return
+
+    observation = {
+        **result,
+        "observational_only": True,
+        "decision_mutated": False,
+        "sources": ["dexscreener", "coingecko"],
+        "collected_at": int(time.time()),
+    }
+    try:
+        fundamental_observation_store.upsert(
+            decision_event_id,
+            symbol,
+            observation["collected_at"],
+            observation,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Unable to persist observational fundamental for %s: %s", symbol, type(exc).__name__)
+
+    live = scanner.active_candidates.get(symbol)
+    if not isinstance(live, dict):
+        return
+    live_metrics = live.get("metrics")
+    if not isinstance(live_metrics, dict):
+        return
+    # Do not overwrite a newer evaluation's metrics with a result that began
+    # against an older snapshot.
+    if scanner.active_candidates.get(symbol) is not candidate_token:
+        return
+    live_metrics["fundamental_observational"] = observation
 
 
 def _lbank_shadow_health_snapshot() -> dict:
@@ -3657,6 +3720,14 @@ async def evaluate_candidate(
         )
     result_metrics["entry_decision"] = entry_decision
 
+    # Fundamental capture is deliberately post-decision and observational. Do
+    # not spend free-provider quota on the entire watch universe; capture only
+    # candidates close enough to a signal that their later outcome is useful.
+    if event_id is not None and entry_decision.get("decision") in {"FORMING", "ENTRY_READY"}:
+        _start_background_task(
+            _refresh_observational_fundamental(symbol, data, int(event_id))
+        )
+
     # ── Per-signal paper trade: open on ENTRY_READY, settle all open ones ──
     if entry_decision.get("decision") == "ENTRY_READY":
         _start_backtest_trade(symbol, result_metrics, entry_decision)
@@ -5215,4 +5286,3 @@ async def fundamental_score_endpoint(symbol: str = ""):
         return result
     except Exception as exc:
         return {"error": str(exc), "fundamental_score": 0, "confidence": 0}
-

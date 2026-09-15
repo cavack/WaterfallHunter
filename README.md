@@ -57,6 +57,24 @@ change applies to new signals only and is recorded with its prior value. The
 shipped defaults are ENTRY_READY >=70, FORMING >=55, 55% evidence coverage,
 2.5 ATR anti-chase, 600s analysis freshness and 60s reference freshness.
 
+## Observational Research
+
+The engine collects two kinds of evidence without allowing them to alter a
+signal: free Fundamental data and decision/outcome calibration data.
+
+- **Fundamental** runs only for `FORMING` and `ENTRY_READY` candidates, uses
+  free DexScreener and CoinGecko sources only, caches for five minutes, and is
+  limited to two concurrent requests. It is persisted against the immutable
+  decision event for later outcome analysis. It has zero score weight and zero
+  gate authority until a replay/walk-forward/holdout study supports one.
+- **OI / taker / cascade** thresholds are not changed from an aggregate chart.
+  `scripts/regime_gate_analysis.py` requires a bootstrap confidence interval
+  and chronological train/holdout agreement before it calls a relationship
+  promising. It currently identifies OI >= -0.13% as promising, taker flow as
+  inconclusive, and cascade as unanalysable in the legacy ledger because its
+  state was not historically captured. Those are research hypotheses, not live
+  gate changes.
+
 There is deliberately no performance table here. Six paper trades are not a
 statistical result. Live outcomes and paper-trade metrics are visible in the
 protected dashboard, and performance claims require a recorded replay,

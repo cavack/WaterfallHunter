@@ -40,6 +40,14 @@ _AI_FIELDS = (
     "ai_reasoning",
     "ai_provider",
 )
+_FUNDAMENTAL_FIELDS = (
+    "fundamental_score",
+    "confidence",
+    "observational_only",
+    "decision_mutated",
+    "sources",
+    "collected_at",
+)
 _LEVERAGE_FIELDS = ("status", "leverage", "reason", "policy_version")
 
 
@@ -105,6 +113,11 @@ def project_dashboard_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
         "leverage_advisory": _pick(live_leverage, _LEVERAGE_FIELDS),
         "ai_advisory": _pick(advisory, _AI_FIELDS),
     }
+    fundamental = _record(metrics.get("fundamental_observational"))
+    if fundamental:
+        projected["metrics"]["fundamental_observational"] = _pick(
+            fundamental, _FUNDAMENTAL_FIELDS
+        )
     if technical_shadow:
         shadow_projection = _pick(
             technical_shadow,

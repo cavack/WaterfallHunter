@@ -112,7 +112,11 @@ function SignalCard({ symbol, candidate }: Readonly<{ symbol: string; candidate:
   const cross = es?.cross_exchange_confirmed as boolean | undefined;
 
   const ai = getMetrics(candidate)?.ai_advisory as Record<string, unknown> | undefined;
+  const fundamental = getMetrics(candidate)?.fundamental_observational as Record<string, unknown> | undefined;
   const aiAdvice = (ai?.ai_advice as string) ?? "";
+  const fundamentalScore = typeof fundamental?.fundamental_score === "number"
+    ? fundamental.fundamental_score
+    : undefined;
   // The engine emits NEUTRAL | AVOID | UNAVAILABLE | PENDING. Anything else
   // means the advisory has not resolved yet.
   const hasAI = aiAdvice === "NEUTRAL" || aiAdvice === "AVOID";
@@ -213,6 +217,14 @@ function SignalCard({ symbol, candidate }: Readonly<{ symbol: string; candidate:
                 }`}
               >
                 AI {aiAdvice}
+              </span>
+            )}
+            {fundamentalScore !== undefined && (
+              <span
+                title="Free DexScreener + CoinGecko observation. It has no decision weight or gate authority."
+                className="rounded bg-violet-500/10 px-2 py-0.5 font-mono text-violet-300"
+              >
+                Fund obs {fundamentalScore.toFixed(0)}
               </span>
             )}
           </div>
