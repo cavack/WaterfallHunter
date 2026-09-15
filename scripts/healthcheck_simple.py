@@ -32,7 +32,7 @@ def main():
     # Also check backend health
     try:
         import urllib.request
-        r = urllib.request.urlopen("http://172.19.0.2:8000/api/health", timeout=5)
+        r = urllib.request.urlopen("http://127.0.0.1:8000/api/health", timeout=5)
         if r.status != 200:
             all_ok = False
             status["backend_api"] = "unhealthy"
