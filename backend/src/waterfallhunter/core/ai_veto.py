@@ -76,7 +76,11 @@ class AICascadeIntelligence:
             + "/api/chat"
         )
         self.ollama_model = str(settings.ollama_model or "qwen2.5:1.5b")
-        self.timeout = 120.0  # Ollama on CPU can be slow
+        # CPU-only inference: bound the queue instead of letting requests pile
+        # up behind a single llama-server slot and expire on timeout.
+        self.timeout = 60.0
+        self.max_concurrent_requests = 2
+        self._request_gate: asyncio.Semaphore | None = None
         logger.info(
             "AICascadeIntelligence initialised: ollama_model=%s, ollama_url=%s",
             self.ollama_model,
@@ -191,6 +195,18 @@ Respond with ONLY this JSON format (no other text):
             "stream": False,
             "options": {"temperature": 0.3},
         }
+        if self._request_gate is None:
+            self._request_gate = asyncio.Semaphore(self.max_concurrent_requests)
+        try:
+            await asyncio.wait_for(
+                self._request_gate.acquire(), timeout=self.timeout
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Ollama advisory queue saturated; skipping request rather than "
+                "queueing behind an unbounded backlog."
+            )
+            return None
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.post(self.ollama_url, json=payload)
@@ -202,9 +218,19 @@ Respond with ONLY this JSON format (no other text):
                     )
                     return None
                 return response.json()
+        except httpx.TimeoutException as exc:
+            logger.warning(
+                "Ollama request timed out after %ss on CPU (%s); advisory marked "
+                "unavailable.",
+                self.timeout,
+                type(exc).__name__,
+            )
+            return None
         except Exception as exc:
             logger.warning("Ollama request failed: %s", exc)
             return None
+        finally:
+            self._request_gate.release()
 
     def status(self) -> dict[str, str]:
         """Return AI status for health checks."""

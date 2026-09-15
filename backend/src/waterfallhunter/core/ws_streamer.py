@@ -35,6 +35,40 @@ def _install_ccxt_ws_client_reset_compat(client_cls: Any | None = None) -> bool:
         return self.reject(error)
 
     setattr(client_cls, "reset", reset)
+
+    # Python CCXT calls ``handle_message`` from the synchronous buffer drain in
+    # ``receive_loop`` and from the ``after_interrupt`` task callback. Neither
+    # boundary is guarded, so an exchange error frame such as
+    # ``AuthenticationError: kucoin token is expired`` escapes the callback, the
+    # scheduled ``receive_loop`` re-arm never runs and the stream dies silently.
+    # Route the failure through ``reset`` so pending consumers fail fast and the
+    # caller can reconnect with a freshly issued token.
+    original_handle_message = getattr(client_cls, "handle_message", None)
+    if callable(original_handle_message) and not getattr(
+        original_handle_message, "_wfh_reset_guarded", False
+    ):
+
+        def handle_message(self, message):
+            try:
+                return original_handle_message(self, message)
+            except asyncio.CancelledError:
+                raise
+            except BaseException as error:  # noqa: BLE001 - CCXT callback boundary
+                logger.warning(
+                    "CCXT WS message boundary failed (%s: %s); resetting client",
+                    type(error).__name__,
+                    str(error)[:120],
+                )
+                reset_fn = getattr(self, "reset", None)
+                if callable(reset_fn):
+                    reset_fn(self, error)
+                else:
+                    self.reject(error)
+                return None
+
+        handle_message._wfh_reset_guarded = True
+        setattr(client_cls, "handle_message", handle_message)
+
     return True
 
 
