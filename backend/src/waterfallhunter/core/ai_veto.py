@@ -78,7 +78,11 @@ class AICascadeIntelligence:
         self.ollama_model = str(settings.ollama_model or "qwen2.5:1.5b")
         # CPU-only inference: bound the queue instead of letting requests pile
         # up behind a single llama-server slot and expire on timeout.
-        self.timeout = 60.0
+        # CPU-only qwen can take longer than a web request even for a tiny
+        # answer. This runs only for ENTRY_READY and the durable notification
+        # worker allows 300s advisory grace, so 120s gives one legitimate
+        # attempt without blocking the hunter or the signal path.
+        self.timeout = 120.0
         self.max_concurrent_requests = 2
         self._request_gate: asyncio.Semaphore | None = None
         logger.info(
@@ -213,31 +217,19 @@ class AICascadeIntelligence:
         h1 = rec(candles.get("1h"))
 
         f = self._fmt
-        prompt = f"""You are reviewing a SHORT (sell) setup produced by a rules-based engine for a perpetual futures market. The engine has already decided; your role is an independent second opinion that is logged next to the decision and never overrides it.
-
-Symbol: {symbol}
-Engine decision: {decision_label} (lifecycle {lifecycle})
-Readiness: {f(readiness, 1)}/100 with {f(coverage, 1)}% of evidence available
-Hard blocks: {block_text}
-Reason codes: {reason_text}
-
-Cascade (liquidation/flow composite): {f(cascade.get("status"))} - {f(cascade.get("readiness_points"), 1)}/{f(cascade.get("maximum_available"), 1)} points
-Order flow: taker buy/sell ratio {f(ev_flow.get("taker_buy_sell_ratio"), 3)} (below 1.0 = sellers dominate), sell share {f(ev_flow.get("sell_share_pct"), 1, "%")}
-Derivatives: OI change 1h {f(ev_deriv.get("oi_change_1h_pct"), 2, "%")}, funding {f(ev_deriv.get("funding_rate_pct"), 4, "%")}
-Execution: spread {f(ev_exec.get("spread_pct"), 3, "%")}
-Cross-exchange breakdown confirmed: {f(evidence.get("cross_exchange_confirmed"))}
-Extension from support: {f(evidence.get("anti_chase_extension_atr"), 2)} ATR (large = chasing)
-4h structure: lower_high={f(h4.get("lower_high"))} failed_pullback={f(h4.get("setup") == "FAILED_PULLBACK")} bearish_close={f(h4.get("bearish_close"))}
-1h timing: lower_high={f(h1.get("lower_high"))} rsi_rollover={f(h1.get("rsi_rollover"))} bearish_close={f(h1.get("bearish_close"))}
-
-Trade plan: entry {f(plan.get("entry_price"), 6)}, stop {f(plan.get("stop_loss"), 6)}, TP1 {f(plan.get("take_profit_1"), 6)}, TP2 {f(plan.get("take_profit_2"), 6)}, reward:risk {f(plan.get("reward_to_risk"), 2)}
-
-Respond with ONLY this JSON (no prose before or after):
-{{"verified": true or false, "note": "one sentence naming the strongest reason for or against this short", "score": 0-100}}
-
-"verified" is true only if you agree the short thesis is supported by the evidence above.
-"score" is your confidence in that judgement, 0-100.
-If the engine decision is NO_TRADE or a hard block is present, explain whether you agree with the block rather than re-litigating the entry.
+        # Keep the CPU prompt compact. The former version was ~500 tokens and
+        # repeated qualitative explanations the model does not need; on this
+        # host that multiplied prompt-evaluation time and starved the advisory
+        # queue. Every value is still canonical and immutable for the decision.
+        prompt = f"""Short-signal second opinion. Advisory only; never overrides engine.
+sym={symbol} decision={decision_label} lifecycle={lifecycle}
+readiness={f(readiness, 1)} coverage={f(coverage, 1)} blocks={block_text}
+cascade={f(cascade.get("status"))}:{f(cascade.get("readiness_points"), 1)}/{f(cascade.get("maximum_available"), 1)} taker={f(ev_flow.get("taker_buy_sell_ratio"), 3)} sell%={f(ev_flow.get("sell_share_pct"), 1)} oi1h%={f(ev_deriv.get("oi_change_1h_pct"), 2)} funding%={f(ev_deriv.get("funding_rate_pct"), 4)} spread%={f(ev_exec.get("spread_pct"), 3)} cross={f(evidence.get("cross_exchange_confirmed"))} extATR={f(evidence.get("anti_chase_extension_atr"), 2)}
+4h lower_high={f(h4.get("lower_high"))} failed_pullback={f(h4.get("setup") == "FAILED_PULLBACK")} bearish={f(h4.get("bearish_close"))}; 1h lower_high={f(h1.get("lower_high"))} rsi_rollover={f(h1.get("rsi_rollover"))} bearish={f(h1.get("bearish_close"))}
+plan entry={f(plan.get("entry_price"), 6)} stop={f(plan.get("stop_loss"), 6)} tp1={f(plan.get("take_profit_1"), 6)} tp2={f(plan.get("take_profit_2"), 6)} rr={f(plan.get("reward_to_risk"), 2)}
+JSON only. `score` must be an integer confidence from 0 through 100; `note`
+must be 12 words or fewer and name the strongest factor:
+{{"verified":true,"note":"Bearish structure and order flow support the short","score":75}}
 """
         return prompt
 
@@ -247,7 +239,13 @@ If the engine decision is NO_TRADE or a hard block is present, explain whether y
             "model": self.ollama_model,
             "messages": [{"role": "user", "content": prompt}],
             "stream": False,
-            "options": {"temperature": 0.3},
+            # Force JSON at the provider boundary and bound generation. The
+            # old advisory prompt merely *asked* for a tiny JSON object, so a
+            # CPU model could still spend tens of seconds generating prose
+            # before failing the parser. This contract needs one sentence and
+            # one score, not an essay.
+            "format": "json",
+            "options": {"temperature": 0.1, "num_predict": 96},
         }
         if self._request_gate is None:
             self._request_gate = asyncio.Semaphore(self.max_concurrent_requests)

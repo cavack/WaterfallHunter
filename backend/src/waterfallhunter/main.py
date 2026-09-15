@@ -3776,7 +3776,12 @@ async def evaluate_candidate(
     )
     replay_context["decision_contract_sha256"] = decision_contract_hash
 
-    if event_id is not None and entry_decision.get("decision") in {"ENTRY_READY", "FORMING"}:
+    # FORMING is evaluated frequently (184 events in 30 minutes during the
+    # incident that exposed this issue). Sending every one to a CPU-only
+    # Ollama with two inference slots starved the queue: even ENTRY_READY
+    # advisories then timed out. AI is a second opinion for a canonical
+    # actionable signal, not a polling-time classifier.
+    if event_id is not None and entry_decision.get("decision") == "ENTRY_READY":
         _start_background_task(
             _refresh_canonical_ai_advisory(
                 symbol, int(event_id), dict(result_metrics), dict(entry_decision)
