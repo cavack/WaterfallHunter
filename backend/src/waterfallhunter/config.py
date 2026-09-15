@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     # Telegram command bot + signal delivery.
     telegram_token: str | None = None
     telegram_chat_id: str | None = None
-    telegram_signal_delivery_enabled: bool = True
+    telegram_signal_delivery_enabled: bool = False
     telegram_signal_delivery_cutover_at: int | None = 1720000000
     # 12-hour health report interval (in seconds, default 43200 = 12h)
     telegram_health_report_interval: int = 43200

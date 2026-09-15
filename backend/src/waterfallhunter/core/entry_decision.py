@@ -623,14 +623,31 @@ def _base_decision(
     cascade_ok = cascade_status == "PASS"
     if not cascade_ok:
         return "NO_TRADE"
-    # Other block_reasons (EXECUTION_UNAVAILABLE, TRADE_PLAN_EXPIRED) are now
-    # scoring penalties, not hard blocks. They reduce readiness but don't force NO_TRADE.
-    # Only cascade FAIL and STRUCTURE_INVALIDATED are hard blocks.
-    
+    # Fail-closed contract: evidence freshness and execution viability are hard
+    # blocks, not scoring penalties. A packet must never advertise an actionable
+    # decision while it is simultaneously hard-blocked.
+    hard_block_reasons = {
+        "STALE_ANALYSIS",
+        "STALE_REFERENCE",
+        "DETERMINISTIC_MARKET_DATA_VETO",
+        "EXECUTION_UNAVAILABLE",
+        "TRADE_PLAN_EXPIRED",
+    }
+    if hard_block_reasons.intersection(block_reasons):
+        return "NO_TRADE"
+    # Freshness is settled above, so a surviving extended move is a genuine
+    # late entry rather than a stale artefact.
+    if anti_chase_late:
+        return "LATE"
+
     gates_pass = (
         readiness >= policy.entry_ready_minimum
         and coverage_pct >= 55.0
-        and direction_ok and trade_plan_ok
+        and direction_ok
+        and trade_plan_ok
+        and timing_ok
+        and execution_ok
+        and cross_ok
     )
     if gates_pass:
         decision = "ACTIVE" if status == "TRIGGERED" else "ENTRY_READY"

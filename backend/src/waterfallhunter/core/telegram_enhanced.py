@@ -287,6 +287,28 @@ def _get_active_candidates(db_adapter: Any) -> dict[str, dict[str, Any]]:
     return {}
 
 
+def _is_hard_blocked(data: dict[str, Any]) -> bool:
+    """Defence in depth: never surface a packet the engine marked hard-blocked.
+
+    ``build_entry_decision`` is the authority on actionability. This guard only
+    ensures a regression there can never leak a blocked packet to subscribers.
+    """
+    if data.get("hard_blocked") is True:
+        return True
+    reasons = data.get("block_reasons")
+    blocking = {
+        "STALE_ANALYSIS",
+        "STALE_REFERENCE",
+        "DETERMINISTIC_MARKET_DATA_VETO",
+        "EXECUTION_UNAVAILABLE",
+        "TRADE_PLAN_EXPIRED",
+        "STRUCTURE_INVALIDATED",
+    }
+    if isinstance(reasons, (list, tuple, set)):
+        return any(str(r).upper() in blocking for r in reasons)
+    return False
+
+
 def _get_signals(db_adapter: Any, scanner: Any) -> list[dict[str, Any]]:
     """Collect every active ENTRY_READY signal.
 
@@ -304,7 +326,7 @@ def _get_signals(db_adapter: Any, scanner: Any) -> list[dict[str, Any]]:
             continue
         status = str(data.get("status") or data.get("Status") or "").upper()
         decision = str(data.get("decision") or data.get("Decision") or "").upper()
-        if status == "ENTRY_READY" or decision == "ENTRY_READY":
+        if (status == "ENTRY_READY" or decision == "ENTRY_READY") and not _is_hard_blocked(data):
             signals.append(_normalise_signal(symbol, data))
 
     # 2) scanner fallback — in-memory live candidates
@@ -319,8 +341,10 @@ def _get_signals(db_adapter: Any, scanner: Any) -> list[dict[str, Any]]:
                     continue
                 status = str(data.get("status") or "").upper()
                 decision = str(data.get("decision") or "").upper()
-                if (status == "ENTRY_READY" or decision == "ENTRY_READY") and not any(
-                    s.get("symbol") == symbol for s in signals
+                if (
+                    (status == "ENTRY_READY" or decision == "ENTRY_READY")
+                    and not _is_hard_blocked(data)
+                    and not any(s.get("symbol") == symbol for s in signals)
                 ):
                     signals.append(_normalise_signal(symbol, data))
 
