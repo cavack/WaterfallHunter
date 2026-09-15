@@ -117,7 +117,16 @@ def _timing_points(metrics: dict[str, Any]) -> tuple[float, float, list[str]]:
             score += 5.0
     if available == 0:
         return 0.0, 0.0, ["TIMING_UNAVAILABLE"]
-    return score, available, ["TIMING_CONFIRMED" if score >= 10.0 else "TIMING_INCOMPLETE"]
+    # ``gates_pass`` requires one confirming lower timeframe (5 points). The
+    # old reason called that same packet TIMING_INCOMPLETE until two timeframes
+    # confirmed, so an ENTRY_READY decision could carry a reason that claimed
+    # one of its required gates failed. Preserve the stronger signal as extra
+    # provenance without lying about the gate that actually passed.
+    if score >= 10.0:
+        return score, available, ["TIMING_CONFIRMED", "TIMING_MULTI_CONFIRMED"]
+    if score >= 5.0:
+        return score, available, ["TIMING_CONFIRMED"]
+    return score, available, ["TIMING_INCOMPLETE"]
 
 
 def _taker_ratio_points(taker_ratio: float | None) -> tuple[float, float]:

@@ -173,9 +173,12 @@ def build_cascade_evidence(
     if maximum_available == 0:
         status = "UNAVAILABLE"
     elif maximum_available >= 4.0:
-        # Calibrated: at least 3 of 4 components available is sufficient for PASS/FAIL
-        # evaluation. Liquidation flow is frequently unavailable (needs real-time WS)
-        # and should not permanently block cascade as PARTIAL.
+        # Any two components can supply >=4 points (trade-flow + derivatives
+        # are 3+3; either plus liquidity/liquidations is 3+2). The previous
+        # comment said "at least 3 of 4", which was mathematically false and
+        # encouraged operators to believe PASS had more independent evidence
+        # than it did. Liquidation flow is often unavailable because it needs
+        # real-time WS, so it must not permanently leave cascade PARTIAL.
         status = "PASS" if readiness_pct is not None and readiness_pct >= 50.0 else "FAIL"
     else:
         status = "PARTIAL"

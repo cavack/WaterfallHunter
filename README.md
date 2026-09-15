@@ -13,12 +13,12 @@ LBank API → Catalog (149 symbols) → Multi-Source Scanner → Cascade Intelli
 
 | Component | Description |
 |-----------|-------------|
-| Multi-Source Scanner | Real-time scanning of 149 symbols from LBank |
-| Cascade Intelligence | Aggregates 8 independent data sources (PASS threshold: ≥4.0) |
+| Multi-Source Scanner | Real-time scanning of the active LBank futures catalogue (refreshed every 15 minutes) |
+| Cascade Intelligence | A secondary flow/liquidity confirmation: trade flow (3), derivatives (3), liquidity (2), liquidation flow (2). PASS needs at least 4 available points and 50% of those points. It overlaps with primary order-flow, derivatives and execution evidence, so it is a configurable confirmation gate, not independent proof. |
 | Entry Decision Engine | Produces ENTRY_READY / FORMING / LATE / NO_TRADE decisions |
 | AI Advisory | Ollama (qwen2.5:1.5b) — observational only, no veto power |
-| Backtester V2 | $100 capital, 30% max exposure, 3 positions, 4x-14x leverage |
-| Risk Manager | Dynamic leverage based on score and risk profile |
+| Paper-trade recorder | Opens on every canonical ENTRY_READY; settles against live LBank prices at stop, targets, or a 24h timeout. It charges round-trip fees and is not a validated performance claim. |
+| Risk Manager | Dynamic 4x–18x **isolated** leverage advisory based on canonical readiness, stop distance, ATR, friction and execution suitability |
 | Telegram Bot | Signal alerts + /signals, /health, /top, /help commands |
 
 ## Decision Levels
@@ -31,32 +31,42 @@ LBank API → Catalog (149 symbols) → Multi-Source Scanner → Cascade Intelli
 | LATE | — | — | Signal too late — do not chase |
 | INVALIDATED | — | — | Structure broken |
 
-## Backtest Results
+## Decision Model
 
-| Metric | Value |
-|--------|-------|
-| Win Rate | 66.7% (4 wins, 1 loss, 1 timeout) |
-| Initial Capital | $100 |
-| Final Capital | $136.80 |
-| Return | 36.8% |
-| Profit Factor | 12.39 |
-| Sharpe Ratio | 2.34 |
-| Max Drawdown | 3.2% |
-| Avg Leverage | 11.0x |
+The engine is an additive, bounded 100-point readiness score — not the
+weighted-average formula that older versions of this README described:
 
-## Score Formula
+| Evidence | Maximum | Notes |
+|----------|--------:|-------|
+| 4h structure | 20 | Hype context, lower high, failed pullback, bearish close, volume acceleration |
+| 1h / 15m / 5m timing | 15 | 5 points for each confirming lower timeframe |
+| Order flow | 20 | Taker ratio, sell-flow imbalance, footprint and microstructure approval |
+| Derivatives | 15 | Funding, OI, top-trader ratio and taker-ratio change |
+| Execution | 10 | Approval, measured spread/slippage and depth |
+| Cross-exchange | 5 | Breakdown confirmation from a second venue |
+| Price location | 5 | Relative to VWAP |
+| Cascade | 10 | Secondary confirmation; see the overlap caveat above |
 
-```
-readiness_score = (structure_score * 0.30) + (cascade_score * 0.25) +
-                  (fundamental_score * 0.20) + (ai_advisory_score * 0.15) +
-                  (execution_score * 0.10)
-```
+`fundamental_scorer.py` is currently an informational endpoint and has **zero
+weight** in the live decision. Ollama is observational and has **zero weight**;
+only the deterministic order-book veto can hard-block. Neither is represented
+as score points until a replay/walk-forward study proves a contribution.
+
+The current policy is operator-adjustable from the protected dashboard. Every
+change applies to new signals only and is recorded with its prior value. The
+shipped defaults are ENTRY_READY >=70, FORMING >=55, 55% evidence coverage,
+2.5 ATR anti-chase, 600s analysis freshness and 60s reference freshness.
+
+There is deliberately no performance table here. Six paper trades are not a
+statistical result. Live outcomes and paper-trade metrics are visible in the
+protected dashboard, and performance claims require a recorded replay,
+walk-forward and holdout protocol.
 
 ## AI Configuration
 
 - **Model**: qwen2.5:1.5b (Ollama, CPU-only)
 - **URL**: http://host.docker.internal:11434
-- **Timeout**: 120s (CPU mode)
+- **Timeout**: 60s (CPU mode, concurrency bounded at 2)
 - **Provider**: Ollama only (no external APIs)
 
 ## Quick Start

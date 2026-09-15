@@ -2,10 +2,49 @@ import pytest
 
 from waterfallhunter.core.entry_decision import (
     EntryDecisionPolicy,
+    _timing_points,
     build_entry_decision,
     build_expired_entry_decision,
     build_invalidated_entry_decision,
 )
+
+
+def test_one_confirming_timeframe_is_reported_as_confirmed_not_incomplete() -> None:
+    """The timing reason must agree with the one-timeframe timing gate."""
+    points, available, reasons = _timing_points(
+        {
+            "candle_features": {
+                "1h": {
+                    "valid": True,
+                    "lower_high": True,
+                    "reclaim": True,
+                    "rsi_rollover": True,
+                    "bearish_close": True,
+                },
+                "15m": {"valid": True},
+                "5m": {"valid": True},
+            }
+        }
+    )
+    assert points == 5.0
+    assert available == 15.0
+    assert reasons == ["TIMING_CONFIRMED"]
+
+
+def test_two_confirming_timeframes_carry_stronger_timing_provenance() -> None:
+    candle = {
+        "valid": True,
+        "lower_high": True,
+        "reclaim": True,
+        "rsi_rollover": True,
+        "bearish_close": True,
+    }
+    points, available, reasons = _timing_points(
+        {"candle_features": {"1h": candle, "15m": candle, "5m": {"valid": True}}}
+    )
+    assert points == 10.0
+    assert available == 15.0
+    assert reasons == ["TIMING_CONFIRMED", "TIMING_MULTI_CONFIRMED"]
 
 
 # ---------------------------------------------------------------------------
