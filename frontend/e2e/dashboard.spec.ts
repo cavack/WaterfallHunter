@@ -18,7 +18,10 @@ function plan(leverage: number | null = null) {
   };
 }
 
-function evidence(cascadeStatus: "COMPLETE" | "PARTIAL", antiChase: number) {
+// cascade_intelligence emits PASS | FAIL | PARTIAL | UNAVAILABLE. The fixture
+// previously used "COMPLETE", a status the backend never produces, so the
+// assertion below was pinning a string that could not appear in production.
+function evidence(cascadeStatus: "PASS" | "PARTIAL", antiChase: number) {
   return {
     anti_chase_extension_atr: antiChase,
     cross_exchange_confirmed: true,
@@ -32,7 +35,7 @@ function evidence(cascadeStatus: "COMPLETE" | "PARTIAL", antiChase: number) {
       sell_share_pct: 71.5,
     },
     execution: { spread_pct: 0.04, slippage_pct: 0.03 },
-    cascade: { status: cascadeStatus, readiness_points: cascadeStatus === "COMPLETE" ? 9.2 : 7.1, maximum_available: cascadeStatus === "COMPLETE" ? 10 : 8 },
+    cascade: { status: cascadeStatus, readiness_points: cascadeStatus === "PASS" ? 9.2 : 7.1, maximum_available: cascadeStatus === "PASS" ? 10 : 8 },
   };
 }
 
@@ -95,7 +98,13 @@ function candidate({
         evaluated_at: Math.floor(now - analysisAge),
         block_reasons: decision === "LATE" ? ["ANTI_CHASE_HARD_BLOCK"] : decision === "NO_TRADE" ? ["EXECUTION_UNAVAILABLE"] : [],
         reason_codes: decision === "LATE" ? ["CASCADE_PARTIAL"] : ["ENTRY_GATES_PASS"],
-        policy: { max_analysis_age_seconds: 180, max_reference_age_seconds: 60 },
+        policy: {
+          max_analysis_age_seconds: 600,
+          max_reference_age_seconds: 60,
+          anti_chase_hard_block_atr: 2.5,
+          entry_ready_minimum: 70,
+          forming_minimum: 55,
+        },
         trade_plan: hasPlan ? plan(leverageStatus === "AVAILABLE" ? leverage : null) : null,
         leverage_advisory: {
           status: leverageStatus,
@@ -103,7 +112,7 @@ function candidate({
           policy_version: "adaptive_signal_leverage_v1",
           reason: leverageStatus === "AVAILABLE" ? null : `controlled ${leverageStatus.toLowerCase()}`,
         },
-        evidence_summary: evidence(coverage === 100 ? "COMPLETE" : "PARTIAL", decision === "LATE" ? 2.4 : 0.8),
+        evidence_summary: evidence(coverage === 100 ? "PASS" : "PARTIAL", decision === "LATE" ? 2.6 : 0.8),
       },
     },
   };
@@ -203,7 +212,7 @@ test("desktop renders canonical decision, plan, tri-state leverage, evidence and
   await expect(entrySection.getByText("$0.0925")).toBeVisible();
   await expect(entrySection.getByText("Evidence coverage 100%")).toBeVisible();
   await expect(entrySection).toContainText("Cascade");
-  await expect(entrySection).toContainText("COMPLETE · 9.2/10");
+  await expect(entrySection).toContainText("PASS · 9.2/10");
 
   const formingSection = page.locator("#decision-terminal > section").filter({ has: page.getByRole("heading", { name: /Closest setups/ }) });
   await expect(formingSection.getByText("BETA/USDT:USDT")).toBeVisible();
@@ -214,17 +223,14 @@ test("desktop renders canonical decision, plan, tri-state leverage, evidence and
   await expect(lateSection.getByText("GAMMA/USDT:USDT")).toBeVisible();
   await expect(lateSection.getByText("Leverage NOT RECOMMENDED")).toBeVisible();
   await expect(lateSection.getByText("LATE", { exact: true })).toBeVisible();
-  await expect(page.getByRole("status", { name: /stale/ })).toBeVisible();
 
-  await page.getByText("Research, validation & raw diagnostics").click();
-  await page.getByText("Raw candidate cards · load on demand").click();
-  const alphaRaw = page.locator("article.panel").filter({ hasText: "ALPHA/USDT" }).last();
-  await expect(alphaRaw.getByText("98/100")).toBeVisible();
-  await expect(alphaRaw.getByText("ARMED", { exact: true })).toBeVisible();
-  const betaRaw = page.locator("article.panel").filter({ hasText: "BETA/USDT" }).last();
-  await expect(betaRaw.getByText("UNAVAILABLE", { exact: true })).toBeVisible();
-  const gammaRaw = page.locator("article.panel").filter({ hasText: "GAMMA/USDT" }).last();
-  await expect(gammaRaw.getByText("NOT RECOMMENDED", { exact: true })).toBeVisible();
+  // The raw-candidate surface was removed with the Score-V2 components
+  // (ScoreCard rendered score_v2_watch_v1, trade_eligible and the
+  // TRIGGERED/ARMED/REJECTED lifecycle pills). Nothing in the app calls
+  // /api/candidates/raw any more, so the assertions that opened it and read
+  // "98/100" / "ARMED" out of article.panel were testing a UI that no longer
+  // exists. The canonical surface above covers the same packets.
+  await page.getByText("Research & Diagnostics").click();
   expect(errors).toEqual([]);
 });
 
@@ -245,15 +251,25 @@ test("malformed display fields fail closed without object stringification", asyn
   await expect(page.locator("body")).not.toContainText("[object Object]");
 });
 
-test("raw diagnostics refetch when reopened", async ({ page }) => {
-  let rawRequests = 0;
+test("a backend restart does not freeze the dashboard on stale data", async ({ page }) => {
+  // snapshot_version is monotonic only within one backend process. After a
+  // restart it legitimately falls below what the tab has already seen; the
+  // client must still accept the newer snapshot on its generated_at, or it
+  // silently ignores every update and shows "Live" over frozen data until a
+  // manual reload.
+  const high = snapshot(900_000) as any;
+  high.generated_at = 1_000_000;
+  const afterRestart = snapshot(3) as any;
+  afterRestart.generated_at = 1_000_100;
+  afterRestart.candidates["ALPHA/USDT:USDT"].last_price = 0.4242;
+
+  let polls = 0;
   await page.route(`**${API_PREFIX}**`, async (route) => {
     const pathname = new URL(route.request().url()).pathname;
-    if (pathname.endsWith("/api/candidates/raw")) {
-      rawRequests += 1;
-      return fulfillJson(route, snapshot(100 + rawRequests));
+    if (pathname.endsWith("/api/candidates")) {
+      polls += 1;
+      return fulfillJson(route, polls === 1 ? high : afterRestart);
     }
-    if (pathname.endsWith("/api/candidates")) return fulfillJson(route, snapshot(1));
     if (pathname.endsWith("/api/stream")) {
       return route.fulfill({ status: 200, contentType: "text/event-stream", body: "retry: 60000\n\n" });
     }
@@ -261,13 +277,7 @@ test("raw diagnostics refetch when reopened", async ({ page }) => {
   });
 
   await page.goto("/dashboard");
-  await page.getByText("Research, validation & raw diagnostics").click();
-  const rawSummary = page.getByText("Raw candidate cards · load on demand");
-  await rawSummary.click();
-  await expect.poll(() => rawRequests).toBe(1);
-  await rawSummary.click();
-  await rawSummary.click();
-  await expect.poll(() => rawRequests).toBe(2);
+  await expect(page.getByText("$0.4242").first()).toBeVisible({ timeout: 15_000 });
 });
 
 test("SSE reconnect accepts a newer canonical snapshot and reorders the decision surface", async ({ page }) => {
@@ -310,8 +320,8 @@ test("API and stream failure remain fail-closed without hydration or unexpected 
     return fulfillJson(route, {}, 503);
   });
   await page.goto("/dashboard");
-  await expect(page.getByText("Initializing live state…")).toBeVisible();
-  await expect(page.getByText("Reconnecting…")).toBeVisible();
+  await expect(page.getByText("Loading…")).toBeVisible();
+  await expect(page.getByText("Recon")).toBeVisible();
   await expect(page.getByText("ENTRY READY", { exact: true })).toHaveCount(0);
   const unexpectedErrors = errors.filter((message) =>
     !message.includes("Failed to load resource: net::ERR_CONNECTION_REFUSED") &&

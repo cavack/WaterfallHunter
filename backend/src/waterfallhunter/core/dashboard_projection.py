@@ -77,8 +77,19 @@ def project_dashboard_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
         decision.get("evidence_summary")
     )
     policy = _record(decision.get("policy"))
+    # The dashboard must render thresholds from the policy that produced the
+    # decision, not from constants compiled into the frontend. Shipping only
+    # the freshness pair left the UI guessing the anti-chase boundary, and it
+    # guessed 1.2 ATR while the engine used 2.5.
     decision_projection["policy"] = _pick(
-        policy, ("max_analysis_age_seconds", "max_reference_age_seconds")
+        policy,
+        (
+            "max_analysis_age_seconds",
+            "max_reference_age_seconds",
+            "anti_chase_hard_block_atr",
+            "entry_ready_minimum",
+            "forming_minimum",
+        ),
     )
     decision_leverage = _record(decision.get("leverage_advisory"))
     if decision_leverage:

@@ -13,7 +13,7 @@ import {
   Target,
   TrendingDown,
 } from "lucide-react";
-import type { Candidate } from "@/components/score-card";
+import type { Candidate } from "@/lib/candidate";
 import {
   advisoryPresentation,
   blockedOrOtherBreakdown,
@@ -151,22 +151,26 @@ function DecisionCard({ symbol, candidate }: Readonly<{ symbol: string; candidat
   const blocks = Array.isArray(decision.block_reasons)
     ? decision.block_reasons.filter((value): value is string => typeof value === "string")
     : [];
-  const currentBlocks = Array.isArray(decision.current_block_reasons)
-    ? decision.current_block_reasons.filter((value): value is string => typeof value === "string")
-    : [];
   const reasons = Array.isArray(decision.reason_codes)
     ? decision.reason_codes.filter((value): value is string => typeof value === "string").slice(0, 8)
     : [];
   const readinessText = !evidenceUnavailable && readiness !== undefined
     ? readiness.toFixed(1)
     : "—";
-  const antiChaseCurrent = record(decision.anti_chase_current);
-  const antiChaseAvailable = antiChaseCurrent.available === true;
-  const antiChaseBlocked = antiChaseCurrent.currently_blocked === true;
-  const antiChaseExt = finite(antiChaseCurrent.extension_atr);
-  const antiChaseThreshold = finite(antiChaseCurrent.threshold_atr);
-  const antiChaseSource = typeof antiChaseCurrent.source === "string" ? antiChaseCurrent.source : undefined;
-  const decisionBeforeAntiChase = typeof decision.decision_before_anti_chase === "string" ? decision.decision_before_anti_chase : undefined;
+  // Anti-chase is read from the fields the engine actually emits: the measured
+  // extension in evidence_summary and the boundary in the decision's own
+  // policy. The previous code read anti_chase_current.{available,
+  // currently_blocked, extension_atr, threshold_atr, source} and
+  // decision_before_anti_chase — none of which exist anywhere in the backend —
+  // so this entire section never rendered, and its fallback displayed 1.2 ATR
+  // while the engine was using 2.5.
+  const antiChaseExt = finite(evidence.anti_chase_extension_atr);
+  const antiChaseThreshold = finite(record(decision.policy).anti_chase_hard_block_atr);
+  const antiChaseBlocked =
+    antiChaseExt !== undefined &&
+    antiChaseThreshold !== undefined &&
+    antiChaseExt >= antiChaseThreshold;
+  const antiChaseAvailable = antiChaseExt !== undefined;
   return (
     <article className={`panel overflow-hidden border ${state === "ENTRY_READY" ? "border-emerald-500/35" : "border-slate-800"}`}>
       <div className="p-4 sm:p-5">
@@ -200,30 +204,16 @@ function DecisionCard({ symbol, candidate }: Readonly<{ symbol: string; candidat
                 {antiChaseBlocked ? "BLOCKED" : "CLEAR"}
               </span>
               <span className="font-mono text-slate-400">
-                ext {antiChaseExt === undefined ? "—" : antiChaseExt.toFixed(2)} / {antiChaseThreshold === undefined ? "1.2" : antiChaseThreshold.toFixed(1)} ATR
+                ext {antiChaseExt === undefined ? "—" : antiChaseExt.toFixed(2)} / {antiChaseThreshold === undefined ? "—" : antiChaseThreshold.toFixed(2)} ATR
               </span>
-              {antiChaseSource ? <span className="text-slate-500">· {antiChaseSource}</span> : null}
-            </div>
-            {decisionBeforeAntiChase ? (
-              <p className="mt-1 text-slate-400">Decision before anti-chase: <span className="font-mono text-slate-300">{decisionBeforeAntiChase}</span></p>
-            ) : null}
-          </div>
-        ) : null}
-        {/* Current vs retained blockers */}
-        {currentBlocks.length > 0 ? (
-          <div className="mt-3 flex gap-2 rounded-lg border border-rose-500/25 bg-rose-500/10 px-3 py-2 text-xs text-rose-100">
-            <ShieldAlert size={15} className="shrink-0" />
-            <div>
-              <span className="font-semibold">Current blockers:</span>
-              <span className="ml-1">{currentBlocks.join(" · ").replaceAll("_", " ")}</span>
             </div>
           </div>
         ) : null}
         {blocks.length > 0 ? (
-          <div className="mt-2 flex gap-2 rounded-lg border border-slate-700 bg-slate-950/40 px-3 py-2 text-xs text-slate-400">
-            <AlertTriangle size={15} className="shrink-0" />
+          <div className="mt-3 flex gap-2 rounded-lg border border-rose-500/25 bg-rose-500/10 px-3 py-2 text-xs text-rose-100">
+            <ShieldAlert size={15} className="shrink-0" />
             <div>
-              <span className="font-semibold text-slate-500">Retained terminal origin:</span>
+              <span className="font-semibold">Blockers:</span>
               <span className="ml-1">{blocks.join(" · ").replaceAll("_", " ")}</span>
             </div>
           </div>
@@ -323,46 +313,40 @@ function symbols(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
-/** Compact anti-chase badge for table rows */
+/** Compact anti-chase badge for table rows.
+ *
+ * Reads the measured extension from evidence_summary and the boundary from the
+ * decision's own policy, so the column reflects the policy that produced the
+ * row rather than a constant duplicated in the frontend.
+ */
 function AntiChaseBadge({ decision }: Readonly<{ decision: Rec }>) {
-  const ac = record(decision.anti_chase_current);
-  if (ac.available !== true) return <span className="text-slate-600">—</span>;
-  const blocked = ac.currently_blocked === true;
-  const ext = finite(ac.extension_atr);
-  const threshold = finite(ac.threshold_atr) ?? 1.2;
-  const ratio = ext !== undefined && threshold > 0 ? ext / threshold : 0;
-  const tone = blocked
-    ? "text-rose-300"
-    : ratio > 0.5 ? "text-amber-300" : "text-emerald-300";
+  const ext = finite(record(decision.evidence_summary).anti_chase_extension_atr);
+  if (ext === undefined) return <span className="text-slate-600">—</span>;
+  const threshold = finite(record(decision.policy).anti_chase_hard_block_atr);
+  const blocked = threshold !== undefined && ext >= threshold;
+  const ratio = threshold !== undefined && threshold > 0 ? ext / threshold : 0;
+  const tone = blocked ? "text-rose-300" : ratio > 0.5 ? "text-amber-300" : "text-emerald-300";
   return (
-    <span className={`font-mono text-xs ${tone}`} title={`extension ${ext === undefined ? "—" : ext.toFixed(2)} ATR / threshold ${threshold} ATR${typeof ac.source === "string" ? ` · ${ac.source}` : ""}`}>
-      {ext === undefined ? "—" : ext.toFixed(2)}{blocked ? " 🔴" : ""}
+    <span
+      className={`font-mono text-xs ${tone}`}
+      title={`extension ${ext.toFixed(2)} ATR / threshold ${threshold === undefined ? "—" : threshold.toFixed(2)} ATR`}
+    >
+      {ext.toFixed(2)}
+      {blocked ? " 🔴" : ""}
     </span>
   );
 }
 
-/** Decision before anti-chase — shows the "real" current decision */
-function OriginBadge({ decision }: Readonly<{ decision: Rec }>) {
-  const origin = typeof decision.decision_before_anti_chase === "string"
-    ? decision.decision_before_anti_chase
-    : undefined;
-  const currentBlocks = Array.isArray(decision.current_block_reasons)
-    ? decision.current_block_reasons.filter((v): v is string => typeof v === "string")
+/** Active blockers recorded on the decision. */
+function BlockersBadge({ decision }: Readonly<{ decision: Rec }>) {
+  const blocks = Array.isArray(decision.block_reasons)
+    ? decision.block_reasons.filter((v): v is string => typeof v === "string")
     : [];
-  if (!origin && currentBlocks.length === 0) return <span className="text-slate-600">—</span>;
+  if (blocks.length === 0) return <span className="text-slate-600">—</span>;
   return (
-    <div className="flex flex-col gap-0.5">
-      {origin ? (
-        <span className="font-mono text-xs text-slate-400" title="Decision before anti-chase was applied">
-          {origin.replaceAll("_", " ")}
-        </span>
-      ) : null}
-      {currentBlocks.length > 0 ? (
-        <span className="text-xs text-rose-300" title="Current active blockers">
-          {currentBlocks.length} blocked
-        </span>
-      ) : null}
-    </div>
+    <span className="text-xs text-rose-300" title={blocks.join(" · ").replaceAll("_", " ")}>
+      {blocks.length} blocked
+    </span>
   );
 }
 
@@ -398,9 +382,10 @@ export function CandidateTable({ candidates, nowSeconds }: Readonly<{ candidates
       const decision = record(record(candidate.metrics).entry_decision);
       const dec = String(decision.decision ?? "UNKNOWN");
       counts[dec] = (counts[dec] ?? 0) + 1;
-      const ac = record(decision.anti_chase_current);
-      if (ac.available === true) {
-        if (ac.currently_blocked === true) antiChaseBlocked++;
+      const ext = finite(record(decision.evidence_summary).anti_chase_extension_atr);
+      const threshold = finite(record(decision.policy).anti_chase_hard_block_atr);
+      if (ext !== undefined) {
+        if (threshold !== undefined && ext >= threshold) antiChaseBlocked++;
         else antiChaseClear++;
       }
     }
@@ -442,7 +427,9 @@ export function CandidateTable({ candidates, nowSeconds }: Readonly<{ candidates
         <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">Anti-Chase</span>
         <span className="status-pill border border-emerald-400/25 bg-emerald-500/10 text-emerald-200">{summary.antiChaseClear} clear</span>
         <span className="status-pill border border-rose-400/25 bg-rose-500/10 text-rose-200">{summary.antiChaseBlocked} blocked</span>
-        <span className="ml-auto text-xs text-slate-500">Sign-aware causal measurement · extension_atr &lt; 0 required for block</span>
+        <span className="ml-auto text-xs text-slate-500">
+          Blocked when extension ≥ the policy&apos;s anti-chase boundary
+        </span>
       </div>
 
       <div className="panel overflow-hidden">
@@ -462,7 +449,7 @@ export function CandidateTable({ candidates, nowSeconds }: Readonly<{ candidates
                 <th>Readiness</th>
                 <th>Price</th>
                 <th>Anti-Chase</th>
-                <th>Origin</th>
+                <th>Blockers</th>
                 <th>OI 1h</th>
                 <th>Taker B/S</th>
                 <th>Cascade</th>
@@ -496,7 +483,7 @@ export function CandidateTable({ candidates, nowSeconds }: Readonly<{ candidates
                     <td className={`font-mono ${evidenceUnavailable ? "text-slate-500" : ""}`} title={evidenceUnavailable ? "Required market evidence unavailable" : undefined}>{readinessText}</td>
                     <td className="font-mono">${price(candidate.last_price)}</td>
                     <td><AntiChaseBadge decision={decPacket} /></td>
-                    <td><OriginBadge decision={decPacket} /></td>
+                    <td><BlockersBadge decision={decPacket} /></td>
                     <td>{pct(derivatives.oi_change_1h_pct, 2)}</td>
                     <td>{number(flow.taker_buy_sell_ratio, 3)}</td>
                     <td>{cascadeText}</td>

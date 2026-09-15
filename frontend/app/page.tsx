@@ -1,8 +1,20 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Activity, Wifi, WifiOff, Clock3, Zap, Target, ChevronDown, BarChart3, FlaskConical, DollarSign, SlidersHorizontal } from "lucide-react";
-import { Candidate } from "@/components/score-card";
+import {
+  Activity,
+  Wifi,
+  WifiOff,
+  Clock3,
+  Zap,
+  Target,
+  ChevronDown,
+  BarChart3,
+  FlaskConical,
+  DollarSign,
+  SlidersHorizontal,
+} from "lucide-react";
+import { Candidate } from "@/lib/candidate";
 import { DecisionTerminal, CandidateTable } from "@/components/decision-terminal";
 import { OutcomeEvidence } from "@/components/outcome-evidence";
 import { RecentSignals } from "@/components/recent-signals";
@@ -26,15 +38,21 @@ function boundedJitter(maximum: number): number {
   return Math.floor((sample[0] / 0xffffffff) * maximum);
 }
 
-/* ─── Helpers ─── */
+/* ─── Packet accessors ───
+   The backend decides. Nothing here re-derives a decision, a label or a
+   threshold: a candidate is actionable because entry_decision.decision says
+   so, never because its readiness crossed a number this file happens to know. */
 function getMetrics(c: Candidate): Record<string, unknown> | undefined {
   const m = c.metrics;
-  return m !== null && typeof m === "object" && !Array.isArray(m) ? (m as Record<string, unknown>) : undefined;
+  return m !== null && typeof m === "object" && !Array.isArray(m)
+    ? (m as Record<string, unknown>)
+    : undefined;
 }
 function getED(c: Candidate): Record<string, unknown> | undefined {
-  const m = getMetrics(c);
-  const ed = m?.entry_decision;
-  return ed !== null && typeof ed === "object" && !Array.isArray(ed) ? (ed as Record<string, unknown>) : undefined;
+  const ed = getMetrics(c)?.entry_decision;
+  return ed !== null && typeof ed === "object" && !Array.isArray(ed)
+    ? (ed as Record<string, unknown>)
+    : undefined;
 }
 function getReadiness(c: Candidate): number {
   const r = getED(c)?.entry_readiness;
@@ -45,14 +63,23 @@ function getDecision(c: Candidate): string {
 }
 function getTradePlan(c: Candidate): Record<string, unknown> | null {
   const tp = getED(c)?.trade_plan;
-  return tp !== null && typeof tp === "object" && !Array.isArray(tp) ? (tp as Record<string, unknown>) : null;
-}
-function getReasons(c: Candidate): string[] {
-  const r = getED(c)?.reason_codes;
-  return Array.isArray(r) ? r.filter((x): x is string => typeof x === "string") : [];
+  return tp !== null && typeof tp === "object" && !Array.isArray(tp)
+    ? (tp as Record<string, unknown>)
+    : null;
 }
 
-/* Smart number formatter - enough precision for any price */
+/** Decisions the engine considers actionable. Everything else is context. */
+const ACTIONABLE = new Set(["ENTRY_READY", "ACTIVE"]);
+
+function decisionTone(decision: string): string {
+  if (ACTIONABLE.has(decision)) return "text-emerald-400";
+  if (decision === "FORMING") return "text-sky-400";
+  if (decision === "LATE") return "text-amber-400";
+  if (decision === "INVALIDATED" || decision === "EXPIRED") return "text-rose-400";
+  return "text-slate-400";
+}
+
+/* Smart number formatter — enough precision for any price */
 function fmt(v: number | undefined): string {
   if (v === undefined || v === null || !Number.isFinite(v)) return "—";
   if (v === 0) return "0";
@@ -64,106 +91,162 @@ function fmt(v: number | undefined): string {
   return v.toFixed(10);
 }
 
-/* ─── Signal Card - compact, no wasted space ─── */
+/* ─── Signal card ─── */
 function SignalCard({ symbol, candidate }: Readonly<{ symbol: string; candidate: Candidate }>) {
   const ed = getED(candidate);
-  const tp = getTradePlan(candidate);
-  if (!ed || !tp) return null;
+  if (!ed) return null;
 
+  const decision = getDecision(candidate);
+  const readiness = getReadiness(candidate);
+  const tp = getTradePlan(candidate);
   const shortName = symbol.replace("/USDT:USDT", "").replace("/USDT", "");
-  const ep = tp.entry_price as number | undefined;
-  const sl = tp.stop_loss as number | undefined;
-  const tp1 = tp.take_profit_1 as number | undefined;
-  const tp2 = tp.take_profit_2 as number | undefined;
-  const r2r = tp.reward_to_risk as number | undefined;
-  const readiness = (ed.entry_readiness as number) ?? 0;
+  const ep = tp?.entry_price as number | undefined;
+  const sl = tp?.stop_loss as number | undefined;
+  const tp1 = tp?.take_profit_1 as number | undefined;
+  const tp2 = tp?.take_profit_2 as number | undefined;
+  const r2r = tp?.reward_to_risk as number | undefined;
+  const leverage = tp?.leverage as number | undefined;
+
   const es = ed.evidence_summary as Record<string, unknown> | undefined;
   const cascade = es?.cascade as Record<string, unknown> | undefined;
   const cross = es?.cross_exchange_confirmed as boolean | undefined;
-  const reasons = getReasons(candidate);
+
   const ai = getMetrics(candidate)?.ai_advisory as Record<string, unknown> | undefined;
   const aiAdvice = (ai?.ai_advice as string) ?? "";
-  const aiProvider = (ai?.ai_provider as string) ?? "";
+  // The engine emits NEUTRAL | AVOID | UNAVAILABLE | PENDING. Anything else
+  // means the advisory has not resolved yet.
+  const hasAI = aiAdvice === "NEUTRAL" || aiAdvice === "AVOID";
 
-  // Only show AI if it actually has advice
-  const hasAI = aiAdvice && aiAdvice !== "—" && aiAdvice !== "UNAVAILABLE" && aiAdvice !== "PENDING" && aiAdvice !== "ERROR";
+  const actionable = ACTIONABLE.has(decision);
+  const tone = actionable
+    ? "border-emerald-500/25 bg-emerald-500/[0.07]"
+    : "border-sky-500/20 bg-sky-500/[0.05]";
 
-  const r2rStr = r2r !== undefined ? `1:${r2r.toFixed(1)}` : "";
-  const riskPct = ep && sl && ep > 0 ? Math.abs((ep - sl) / ep * 100).toFixed(1) : "—";
-
-  const decColor = readiness >= 55 ? "text-emerald-400" : readiness >= 40 ? "text-sky-400" : "text-amber-400";
-  const decBg = readiness >= 55 ? "bg-emerald-500/10 border-emerald-500/20" : readiness >= 40 ? "bg-sky-500/10 border-sky-500/20" : "bg-amber-500/10 border-amber-500/20";
+  const riskPct =
+    ep && sl && ep > 0 ? Math.abs(((ep - sl) / ep) * 100).toFixed(1) : undefined;
 
   return (
-    <div className={`rounded-xl border ${decBg} p-4 transition-all hover:scale-[1.01] hover:shadow-lg hover:shadow-black/20`}>
-      {/* Header: symbol + readiness badge */}
-      <div className="flex items-center justify-between mb-3">
+    <div className={`rounded-xl border ${tone} p-4 transition-shadow hover:shadow-lg hover:shadow-black/20`}>
+      <div className="mb-3 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-800/60 text-xs font-bold text-white">
             {shortName.slice(0, 3)}
           </div>
-          <div>
-            <span className="text-base font-bold text-white">{shortName}</span>
-            <span className="ml-1.5 text-[10px] text-slate-500">{String(candidate.status ?? "—")}</span>
-          </div>
+          <span className="text-base font-bold text-white">{shortName}</span>
         </div>
-        <div className={`rounded-lg px-2.5 py-1 text-center ${decColor} bg-slate-900/50`}>
-          <span className="font-mono text-lg font-bold">{readiness.toFixed(0)}</span>
-          <span className={`text-[9px] block leading-none ${readiness >= 70 ? "text-emerald-400" : "text-sky-400"}`}>{readiness >= 70 ? "READY" : "FORMING"}</span>
-        </div>
-      </div>
-
-      {/* Trade plan - compact inline, no gaps */}
-      <div className="grid grid-cols-3 gap-1.5 mb-2">
-        <div className="rounded-lg bg-sky-500/5 border border-sky-500/10 px-2.5 py-2">
-          <div className="text-[9px] uppercase text-sky-400/60 mb-0.5">Entry</div>
-          <div className="font-mono text-sm font-bold text-sky-300">{fmt(ep)}</div>
-        </div>
-        <div className="rounded-lg bg-rose-500/5 border border-rose-500/10 px-2.5 py-2">
-          <div className="text-[9px] uppercase text-rose-400/60 mb-0.5">Stop</div>
-          <div className="font-mono text-sm font-bold text-rose-300">{fmt(sl)}</div>
-        </div>
-        <div className="rounded-lg bg-emerald-500/5 border border-emerald-500/10 px-2.5 py-2">
-          <div className="text-[9px] uppercase text-emerald-400/60 mb-0.5">Target</div>
-          <div className="font-mono text-sm font-bold text-emerald-300">{fmt(tp1)}</div>
-        </div>
-      </div>
-
-      {/* Badges - compact, full width */}
-      <div className="flex flex-wrap gap-1.5 text-[10px]">
-        {r2rStr && <span className="rounded bg-slate-800/60 px-2 py-0.5 text-slate-300 font-mono">{r2rStr}</span>}
-        <span className="rounded bg-slate-800/60 px-2 py-0.5 text-slate-300 font-mono">Risk {riskPct}%</span>
-        {tp2 !== undefined && tp2 !== null && <span className="rounded bg-slate-800/60 px-2 py-0.5 text-slate-300 font-mono">TP2 {fmt(tp2)}</span>}
-        {cross !== undefined && (
-          <span className={`rounded px-2 py-0.5 font-mono ${cross ? "bg-emerald-500/10 text-emerald-400" : "bg-slate-800/40 text-slate-500"}`}>
-            Cross {cross ? "✓" : "—"}
+        <div className="rounded-lg bg-slate-900/50 px-2.5 py-1 text-center">
+          <span className={`font-mono text-lg font-bold ${decisionTone(decision)}`}>
+            {readiness.toFixed(0)}
           </span>
-        )}
-        {cascade && <span className={`rounded px-2 py-0.5 font-mono ${String(cascade.status) === "PASS" ? "bg-emerald-500/10 text-emerald-400" : "bg-rose-500/10 text-rose-400"}`}>{String(cascade.status ?? "?")}</span>}
-        {hasAI && (
-          <span className={`rounded px-2 py-0.5 font-mono ${
-            aiAdvice === "LONG" || aiAdvice === "GO" ? "bg-emerald-500/10 text-emerald-400" :
-            aiAdvice === "SHORT" || aiAdvice === "AVOID" ? "bg-rose-500/10 text-rose-400" :
-            "bg-amber-500/10 text-amber-400"
-          }`}>AI {aiAdvice}</span>
-        )}
+          {/* The decision comes from the engine, not from comparing readiness
+              to a threshold duplicated in the browser. */}
+          <span className={`block text-[9px] leading-none ${decisionTone(decision)}`}>
+            {decision.replace("_", " ")}
+          </span>
+        </div>
       </div>
+
+      {tp ? (
+        <>
+          <div className="mb-2 grid grid-cols-3 gap-1.5">
+            <div className="rounded-lg border border-sky-500/10 bg-sky-500/5 px-2.5 py-2">
+              <div className="mb-0.5 text-[9px] uppercase text-sky-400/60">Entry</div>
+              <div className="font-mono text-sm font-bold text-sky-300">{fmt(ep)}</div>
+            </div>
+            <div className="rounded-lg border border-rose-500/10 bg-rose-500/5 px-2.5 py-2">
+              <div className="mb-0.5 text-[9px] uppercase text-rose-400/60">Stop</div>
+              <div className="font-mono text-sm font-bold text-rose-300">{fmt(sl)}</div>
+            </div>
+            <div className="rounded-lg border border-emerald-500/10 bg-emerald-500/5 px-2.5 py-2">
+              <div className="mb-0.5 text-[9px] uppercase text-emerald-400/60">Target</div>
+              <div className="font-mono text-sm font-bold text-emerald-300">{fmt(tp1)}</div>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-1.5 text-[10px]">
+            {r2r !== undefined && (
+              <span className="rounded bg-slate-800/60 px-2 py-0.5 font-mono text-slate-300">
+                1:{r2r.toFixed(1)}
+              </span>
+            )}
+            {riskPct && (
+              <span className="rounded bg-slate-800/60 px-2 py-0.5 font-mono text-slate-300">
+                Risk {riskPct}%
+              </span>
+            )}
+            {leverage !== undefined && leverage !== null && (
+              <span className="rounded bg-violet-500/10 px-2 py-0.5 font-mono text-violet-300">
+                {leverage}x iso
+              </span>
+            )}
+            {tp2 !== undefined && tp2 !== null && (
+              <span className="rounded bg-slate-800/60 px-2 py-0.5 font-mono text-slate-300">
+                TP2 {fmt(tp2)}
+              </span>
+            )}
+            {cross !== undefined && (
+              <span
+                className={`rounded px-2 py-0.5 font-mono ${
+                  cross ? "bg-emerald-500/10 text-emerald-400" : "bg-slate-800/40 text-slate-500"
+                }`}
+              >
+                Cross {cross ? "✓" : "—"}
+              </span>
+            )}
+            {cascade && (
+              <span
+                className={`rounded px-2 py-0.5 font-mono ${
+                  String(cascade.status) === "PASS"
+                    ? "bg-emerald-500/10 text-emerald-400"
+                    : "bg-rose-500/10 text-rose-400"
+                }`}
+              >
+                {String(cascade.status ?? "?")}
+              </span>
+            )}
+            {hasAI && (
+              <span
+                className={`rounded px-2 py-0.5 font-mono ${
+                  aiAdvice === "AVOID"
+                    ? "bg-rose-500/10 text-rose-400"
+                    : "bg-slate-800/60 text-slate-300"
+                }`}
+              >
+                AI {aiAdvice}
+              </span>
+            )}
+          </div>
+        </>
+      ) : (
+        <p className="text-[11px] text-slate-500">
+          No trade plan attached — the engine has not published levels for this decision.
+        </p>
+      )}
     </div>
   );
 }
 
-/* ─── Market Overview - compact ─── */
-function MarketOverview({ candidates }: Readonly<{ candidates: Record<string, Candidate> }>) {
+/* ─── Market overview ─── */
+function MarketOverview({
+  candidates,
+  terminal,
+}: Readonly<{
+  candidates: Record<string, Candidate>;
+  terminal: Record<string, unknown> | undefined;
+}>) {
   const btc = candidates["BTC/USDT:USDT"];
   const eth = candidates["ETH/USDT:USDT"];
   const btcPrice = typeof btc?.last_price === "number" ? btc.last_price : undefined;
   const ethPrice = typeof eth?.last_price === "number" ? eth.last_price : undefined;
-  const all = Object.values(candidates);
-  const fuelRich = all.filter((c) => c.status === "FUEL-RICH").length;
-  const watch = all.filter((c) => c.status === "WATCH").length;
-  const bearish = fuelRich > watch;
-  const entryReady = all.filter((c) => getDecision(c) === "ENTRY_READY" || getDecision(c) === "ACTIVE").length;
-  const forming = all.filter((c) => getDecision(c) === "FORMING").length;
+
+  // Counts come from decision_terminal, which the backend already computed.
+  // Recomputing them here produced a third number that could disagree with
+  // both the terminal and the table below it.
+  const counts = (terminal?.counts ?? {}) as Record<string, number>;
+  const num = (key: string) => (typeof counts[key] === "number" ? counts[key] : 0);
+  const ready = num("ENTRY_READY") + num("ACTIVE");
+  const forming = num("FORMING");
+  const late = num("LATE");
 
   const fmtPrice = (v: number | undefined) => {
     if (v === undefined) return "—";
@@ -172,51 +255,40 @@ function MarketOverview({ candidates }: Readonly<{ candidates: Record<string, Ca
     return `$${v.toFixed(4)}`;
   };
 
+  const tile = (label: string, value: string, cls: string, border: string) => (
+    <div className={`rounded-lg border ${border} p-2.5`}>
+      <div className="text-[10px] text-slate-400">{label}</div>
+      <div className={`mt-0.5 font-mono text-sm font-bold ${cls}`}>{value}</div>
+    </div>
+  );
+
   return (
     <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
-      <div className="rounded-lg border border-amber-500/15 bg-amber-500/5 p-2.5">
-        <div className="text-[10px] text-amber-400/60">BTC</div>
-        <div className="mt-0.5 font-mono text-sm font-bold text-amber-200">{fmtPrice(btcPrice)}</div>
-      </div>
-      <div className="rounded-lg border border-indigo-500/15 bg-indigo-500/5 p-2.5">
-        <div className="text-[10px] text-indigo-400/60">ETH</div>
-        <div className="mt-0.5 font-mono text-sm font-bold text-indigo-200">{fmtPrice(ethPrice)}</div>
-      </div>
-      <div className="rounded-lg border border-slate-700/30 bg-slate-800/30 p-2.5">
-        <div className="text-[10px] text-slate-400">Market</div>
-        <div className={`mt-0.5 text-sm font-bold ${bearish ? "text-rose-400" : "text-amber-400"}`}>
-          {bearish ? "Bear" : "Neutral"}
-        </div>
-      </div>
-      <div className="rounded-lg border border-slate-700/30 bg-slate-800/30 p-2.5">
-        <div className="text-[10px] text-slate-400">Tracked</div>
-        <div className="mt-0.5 font-mono text-sm font-bold text-slate-200">{all.length}</div>
-      </div>
-      <div className="rounded-lg border border-emerald-500/15 bg-emerald-500/5 p-2.5">
-        <div className="text-[10px] text-emerald-400/60">Ready</div>
-        <div className="mt-0.5 font-mono text-sm font-bold text-emerald-300">{entryReady}</div>
-      </div>
-      <div className="rounded-lg border border-sky-500/15 bg-sky-500/5 p-2.5">
-        <div className="text-[10px] text-sky-400/60">Forming</div>
-        <div className="mt-0.5 font-mono text-sm font-bold text-sky-300">{forming}</div>
-      </div>
+      {tile("BTC", fmtPrice(btcPrice), "text-amber-200", "border-amber-500/15 bg-amber-500/5")}
+      {tile("ETH", fmtPrice(ethPrice), "text-indigo-200", "border-indigo-500/15 bg-indigo-500/5")}
+      {tile("Tracked", String(Object.keys(candidates).length), "text-slate-200", "border-slate-700/30 bg-slate-800/30")}
+      {tile("Ready", String(ready), "text-emerald-300", "border-emerald-500/15 bg-emerald-500/5")}
+      {tile("Forming", String(forming), "text-sky-300", "border-sky-500/15 bg-sky-500/5")}
+      {tile("Late", String(late), "text-amber-300", "border-amber-500/15 bg-amber-500/5")}
     </div>
   );
 }
 
-/* ─── Top Candidates - compact list ─── */
-function TopCandidates({ rows, excludeSymbols }: Readonly<{ rows: [string, Candidate][]; excludeSymbols: Set<string> }>) {
-  // Only show candidates with meaningful readiness, sorted, limited to 5
+/* ─── Top candidates ─── */
+function TopCandidates({
+  rows,
+  excludeSymbols,
+}: Readonly<{ rows: [string, Candidate][]; excludeSymbols: Set<string> }>) {
+  // Ranked by the engine's readiness. No client-side floor: a candidate is
+  // shown because it is among the highest-ranked, not because it cleared an
+  // arbitrary number invented here.
   const top5 = rows
     .filter(([sym]) => !excludeSymbols.has(sym))
-    .filter(([, c]) => getReadiness(c) >= 40)
+    .filter(([, c]) => getED(c) !== undefined)
     .sort(([, a], [, b]) => getReadiness(b) - getReadiness(a))
     .slice(0, 5);
 
   if (top5.length === 0) return null;
-
-  const decColor = (dec: string) =>
-    dec === "ENTRY_READY" || dec === "ACTIVE" ? "text-emerald-400" : dec === "FORMING" ? "text-sky-400" : dec === "LATE" ? "text-amber-400" : "text-slate-400";
 
   return (
     <section>
@@ -232,19 +304,29 @@ function TopCandidates({ rows, excludeSymbols }: Readonly<{ rows: [string, Candi
 
           return (
             <div key={symbol} className="rounded-lg border border-slate-800/60 bg-slate-900/50 p-3">
-              <div className="flex items-center justify-between mb-1.5">
-                <span className="font-bold text-sm text-white">{shortName}</span>
-                <span className={`text-[10px] font-semibold ${decColor(dec)}`}>{dec}</span>
+              <div className="mb-1.5 flex items-center justify-between">
+                <span className="text-sm font-bold text-white">{shortName}</span>
+                <span className={`text-[10px] font-semibold ${decisionTone(dec)}`}>
+                  {dec.replace("_", " ")}
+                </span>
               </div>
-              <div className="flex items-baseline justify-between mb-2">
-                <span className="font-mono text-lg font-bold text-emerald-400">{r.toFixed(0)}</span>
-                <span className="text-[10px] text-slate-500">{String(candidate.status ?? "—")}</span>
-              </div>
+              <div className="mb-2 font-mono text-lg font-bold text-slate-200">{r.toFixed(0)}</div>
               {tp && (
                 <div className="grid grid-cols-3 gap-1 text-[10px]">
-                  <div><span className="text-slate-500">EP</span> <span className="font-mono text-sky-300">{fmt(tp.entry_price as number)}</span></div>
-                  <div><span className="text-slate-500">SL</span> <span className="font-mono text-rose-300">{fmt(tp.stop_loss as number)}</span></div>
-                  <div><span className="text-slate-500">TP</span> <span className="font-mono text-emerald-300">{fmt(tp.take_profit_1 as number)}</span></div>
+                  <div>
+                    <span className="text-slate-500">EP</span>{" "}
+                    <span className="font-mono text-sky-300">{fmt(tp.entry_price as number)}</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500">SL</span>{" "}
+                    <span className="font-mono text-rose-300">{fmt(tp.stop_loss as number)}</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500">TP</span>{" "}
+                    <span className="font-mono text-emerald-300">
+                      {fmt(tp.take_profit_1 as number)}
+                    </span>
+                  </div>
                 </div>
               )}
             </div>
@@ -255,62 +337,75 @@ function TopCandidates({ rows, excludeSymbols }: Readonly<{ rows: [string, Candi
   );
 }
 
-/* ─── Backtester Results ─── */
-function BacktesterResults() {
+/* ─── Paper-trade results ─── */
+function PaperTradeResults() {
   const [data, setData] = useState<Record<string, unknown> | null>(null);
 
   useEffect(() => {
     const load = async () => {
       try {
-        const r = await fetch(`/api/backtest/results`);
+        // The basePath prefix is required: without it the request bypasses the
+        // Next rewrite and 404s behind nginx, so this panel never rendered.
+        const r = await fetch("/dashboard/api/backtest/results", { cache: "no-store" });
         if (r.ok) setData(await r.json());
-      } catch { /* ignore */ }
+      } catch {
+        /* transient; retried on the next tick */
+      }
     };
-    load();
-    const t = setInterval(load, 60000);
+    void load();
+    const t = setInterval(() => void load(), 60000);
     return () => clearInterval(t);
   }, []);
 
   if (!data) return null;
   const stats = (data.stats ?? {}) as Record<string, unknown>;
-  if (Object.keys(stats).length === 0) return null;
+  const trades = Number(stats.total_trades ?? 0);
+  if (!Number.isFinite(trades) || trades === 0) {
+    return (
+      <section>
+        <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-500">
+          <DollarSign size={13} className="mr-1.5 inline text-amber-400" /> Paper trades
+        </h2>
+        <p className="rounded-lg border border-slate-800/60 bg-slate-900/50 p-3 text-[11px] text-slate-500">
+          No settled paper trades yet. Each ENTRY_READY signal opens one and settles it against
+          live prices at its stop, targets, or the 24h timeout.
+        </p>
+      </section>
+    );
+  }
+
+  const n = (key: string, digits: number) => Number(stats[key] ?? 0).toFixed(digits);
+  const tile = (label: string, value: string, cls: string) => (
+    <div className="rounded-lg border border-slate-800/60 bg-slate-900/50 p-2.5">
+      <div className="text-[10px] text-slate-500">{label}</div>
+      <div className={`mt-0.5 font-mono text-sm font-bold ${cls}`}>{value}</div>
+    </div>
+  );
 
   return (
     <section>
       <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-500">
-        <DollarSign size={13} className="mr-1.5 inline text-amber-400" /> Backtester · $100 Capital · 4-14x Leverage
+        <DollarSign size={13} className="mr-1.5 inline text-amber-400" /> Paper trades · $100 ·
+        4–18x isolated
       </h2>
       <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
-        <div className="rounded-lg border border-slate-800/60 bg-slate-900/50 p-2.5">
-          <div className="text-[10px] text-slate-500">Capital</div>
-          <div className="mt-0.5 font-mono text-sm font-bold text-amber-300">${Number(stats.current_capital ?? 200).toFixed(2)}</div>
-        </div>
-        <div className="rounded-lg border border-slate-800/60 bg-slate-900/50 p-2.5">
-          <div className="text-[10px] text-slate-500">Trades</div>
-          <div className="mt-0.5 font-mono text-sm font-bold text-slate-200">{String(stats.total_trades ?? 0)}</div>
-        </div>
-        <div className="rounded-lg border border-slate-800/60 bg-slate-900/50 p-2.5">
-          <div className="text-[10px] text-slate-500">Win Rate</div>
-          <div className="mt-0.5 font-mono text-sm font-bold text-emerald-400">{Number(stats.win_rate ?? 0).toFixed(0)}%</div>
-        </div>
-        <div className="rounded-lg border border-slate-800/60 bg-slate-900/50 p-2.5">
-          <div className="text-[10px] text-slate-500">Max DD</div>
-          <div className="mt-0.5 font-mono text-sm font-bold text-rose-400">{Number(stats.max_drawdown_pct ?? 0).toFixed(1)}%</div>
-        </div>
-        <div className="rounded-lg border border-slate-800/60 bg-slate-900/50 p-2.5">
-          <div className="text-[10px] text-slate-500">PF</div>
-          <div className="mt-0.5 font-mono text-sm font-bold text-sky-300">{Number(stats.profit_factor ?? 0).toFixed(2)}</div>
-        </div>
-        <div className="rounded-lg border border-slate-800/60 bg-slate-900/50 p-2.5">
-          <div className="text-[10px] text-slate-500">Sharpe</div>
-          <div className="mt-0.5 font-mono text-sm font-bold text-violet-300">{Number(stats.sharpe_ratio ?? 0).toFixed(2)}</div>
-        </div>
+        {tile("Capital", `$${n("current_capital", 2)}`, "text-amber-300")}
+        {tile("Trades", String(trades), "text-slate-200")}
+        {tile("Win Rate", `${n("win_rate", 0)}%`, "text-emerald-400")}
+        {tile("Max DD", `${n("max_drawdown_pct", 1)}%`, "text-rose-400")}
+        {tile("PF", n("profit_factor", 2), "text-sky-300")}
+        {tile("Sharpe", n("sharpe_ratio", 2), "text-violet-300")}
       </div>
+      {trades < 30 && (
+        <p className="mt-2 text-[10px] text-amber-400/80">
+          {trades} settled trades is too small a sample to read as performance.
+        </p>
+      )}
     </section>
   );
 }
 
-/* ─── Main Dashboard ─── */
+/* ─── Main dashboard ─── */
 export default function Dashboard() {
   const [data, setData] = useState<DashboardSnapshot | null>(null);
   const [mode, setMode] = useState<ConnectionMode>("reconnecting");
@@ -370,7 +465,8 @@ export default function Dashboard() {
           } catch {
             pollAttempt++;
             if (!streaming) setMode("reconnecting");
-            if (!streaming || !hasSnapshot) schedulePoll(Math.min(30000, 1000 * 2 ** Math.min(pollAttempt, 5)));
+            if (!streaming || !hasSnapshot)
+              schedulePoll(Math.min(30000, 1000 * 2 ** Math.min(pollAttempt, 5)));
           }
         })();
       }, delay + (delay > 0 ? boundedJitter(1500) : 0));
@@ -407,8 +503,14 @@ export default function Dashboard() {
       schedulePoll(1000);
     };
     stream.onmessage = onMsg;
-    stream.addEventListener("snapshot", (e) => e instanceof MessageEvent && onMsg(e as MessageEvent<string>));
-    stream.addEventListener("heartbeat", (e) => e instanceof MessageEvent && onMsg(e as MessageEvent<string>));
+    stream.addEventListener(
+      "snapshot",
+      (e) => e instanceof MessageEvent && onMsg(e as MessageEvent<string>),
+    );
+    stream.addEventListener(
+      "heartbeat",
+      (e) => e instanceof MessageEvent && onMsg(e as MessageEvent<string>),
+    );
     schedulePoll(0);
     watchdog = setInterval(() => {
       if (!active || !streaming || lastStreamEventAt.current <= 0) return;
@@ -427,16 +529,20 @@ export default function Dashboard() {
     };
   }, []);
 
-  const candidates = (data?.candidates ?? {}) as Record<string, Candidate>;
+  const candidates = useMemo(
+    () => (data?.candidates ?? {}) as Record<string, Candidate>,
+    [data],
+  );
   const nowSeconds = freshnessNow;
 
+  // Ranked by the engine's readiness. The previous sort used the retired
+  // Gen-1 top-level `score`, which is null on every live packet, so the table
+  // was effectively unordered.
   const rows = useMemo(
     () =>
-      Object.entries(candidates).sort(([, a], [, b]) => {
-        const ra = typeof a.score === "number" ? a.score : -1;
-        const rb = typeof b.score === "number" ? b.score : -1;
-        return rb - ra;
-      }),
+      Object.entries(candidates).sort(
+        ([, a], [, b]) => getReadiness(b) - getReadiness(a),
+      ),
     [candidates],
   );
 
@@ -445,36 +551,32 @@ export default function Dashboard() {
     [candidates, freshnessNow],
   );
 
-  // Only show high-quality signals: ENTRY_READY + FORMING with readiness >= 45
+  // Actionable decisions only. The engine already applied every gate; adding
+  // a second filter here (the old "FORMING and readiness >= 45 and cascade
+  // PASS") invented a policy the backend never agreed to.
   const signals = useMemo(
-    () =>
-      rows.filter(([, c]) => {
-        const d = getDecision(c);
-        const r = getReadiness(c);
-        const es = getED(c)?.evidence_summary as Record<string, unknown> | undefined;
-        const casc = es?.cascade as Record<string, unknown> | undefined;
-        const cascStatus = (casc?.status as string) ?? "FAIL";
-        return (d === "ENTRY_READY" || d === "ACTIVE") || (d === "FORMING" && r >= 45 && cascStatus === "PASS");
-      }),
+    () => rows.filter(([, c]) => ACTIONABLE.has(getDecision(c))),
     [rows],
   );
 
   const signalSymbols = useMemo(() => new Set(signals.map(([s]) => s)), [signals]);
 
+  const terminal = data?.decision_terminal as Record<string, unknown> | undefined;
+
   return (
     <main className="min-h-dvh bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 pb-20 text-slate-100">
-      {/* Subtle texture overlay */}
       <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(circle_at_50%_0%,rgba(16,185,129,0.03),transparent_50%)]" />
 
-      {/* ─── Header ─── */}
       <header className="sticky top-0 z-40 border-b border-slate-800/40 bg-slate-950/80 backdrop-blur-xl">
         <div className="mx-auto flex h-14 max-w-7xl items-center gap-3 px-4 sm:px-6">
           <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-emerald-500/15">
             <Activity size={16} className="text-emerald-400" />
           </div>
           <div className="min-w-0">
-            <h1 className="text-base font-bold tracking-tight text-white truncate">WaterfallHunter</h1>
-            <p className="text-[10px] text-slate-500 hidden sm:block">Signal Terminal</p>
+            <h1 className="truncate text-base font-bold tracking-tight text-white">
+              WaterfallHunter
+            </h1>
+            <p className="hidden text-[10px] text-slate-500 sm:block">Signal Terminal</p>
           </div>
           <div className="ml-auto flex items-center gap-2">
             {generatedAt !== null && (
@@ -482,11 +584,25 @@ export default function Dashboard() {
                 {new Date(generatedAt).toLocaleTimeString()}
               </time>
             )}
-            <span className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${freshnessSummary.state === "fresh" ? "bg-emerald-500/10 text-emerald-300" : "bg-amber-500/10 text-amber-300"}`}>
+            <span
+              className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                freshnessSummary.state === "fresh"
+                  ? "bg-emerald-500/10 text-emerald-300"
+                  : "bg-amber-500/10 text-amber-300"
+              }`}
+            >
               <Clock3 size={10} />
               {freshnessSummary.fresh}/{freshnessSummary.total}
             </span>
-            <span className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${mode === "stream" ? "bg-emerald-500/10 text-emerald-300" : mode === "polling" ? "bg-sky-500/10 text-sky-300" : "bg-amber-500/10 text-amber-300"}`}>
+            <span
+              className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                mode === "stream"
+                  ? "bg-emerald-500/10 text-emerald-300"
+                  : mode === "polling"
+                    ? "bg-sky-500/10 text-sky-300"
+                    : "bg-amber-500/10 text-amber-300"
+              }`}
+            >
               {mode === "stream" ? <Wifi size={10} /> : <WifiOff size={10} />}
               {mode === "stream" ? "Live" : mode === "polling" ? "Poll" : "Recon"}
             </span>
@@ -503,53 +619,66 @@ export default function Dashboard() {
           </div>
         ) : (
           <>
-            {/* ─── 1. Active Signals ─── */}
-            {signals.length > 0 && (
-              <section>
-                <div className="flex items-center gap-2 mb-3">
-                  <Zap size={14} className="text-emerald-400" />
-                  <h2 className="text-xs font-semibold uppercase tracking-wide text-emerald-400">
-                    Signals ({signals.length})
-                  </h2>
-                </div>
+            {/* ─── 1. Actionable signals ─── */}
+            <section>
+              <div className="mb-3 flex items-center gap-2">
+                <Zap size={14} className="text-emerald-400" />
+                <h2 className="text-xs font-semibold uppercase tracking-wide text-emerald-400">
+                  Signals ({signals.length})
+                </h2>
+              </div>
+              {signals.length > 0 ? (
                 <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
                   {signals.map(([symbol, candidate]) => (
                     <SignalCard key={symbol} symbol={symbol} candidate={candidate} />
                   ))}
                 </div>
-              </section>
-            )}
-
-            {/* ─── 2. Market Overview ─── */}
-            <section>
-              <div className="flex items-center gap-2 mb-3">
-                <Activity size={14} className="text-amber-400" />
-                <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Market</h2>
-              </div>
-              <MarketOverview candidates={candidates} />
+              ) : (
+                <p className="rounded-lg border border-slate-800/60 bg-slate-900/50 p-3 text-[11px] text-slate-500">
+                  No actionable signal right now. This is the normal state: the engine is
+                  fail-closed, so a candidate becomes ENTRY_READY only when every gate passes.
+                </p>
+              )}
             </section>
 
-            {/* ─── 3. Top Candidates ─── */}
+            {/* ─── 2. Market ─── */}
+            <section>
+              <div className="mb-3 flex items-center gap-2">
+                <Activity size={14} className="text-amber-400" />
+                <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Market
+                </h2>
+              </div>
+              <MarketOverview candidates={candidates} terminal={terminal} />
+            </section>
+
+            {/* ─── 3. Top candidates ─── */}
             <TopCandidates rows={rows} excludeSymbols={signalSymbols} />
 
-            {/* ─── 4. Backtester ─── */}
-            <BacktesterResults />
+            {/* ─── 4. Paper trades ─── */}
+            <PaperTradeResults />
 
-            {/* ─── 5. Decision Terminal ─── */}
+            {/* ─── 5. Decision terminal ─── */}
             <section>
-              <div className="flex items-center gap-2 mb-3">
+              <div className="mb-3 flex items-center gap-2">
                 <Target size={14} className="text-sky-400" />
-                <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Decision Terminal</h2>
+                <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Decision Terminal
+                </h2>
               </div>
               <CandidateTable candidates={candidates} nowSeconds={nowSeconds} />
               <div className="mt-4">
-                <DecisionTerminal terminal={data.decision_terminal} candidates={candidates} nowSeconds={nowSeconds} />
+                <DecisionTerminal
+                  terminal={data.decision_terminal}
+                  candidates={candidates}
+                  nowSeconds={nowSeconds}
+                />
               </div>
             </section>
 
-            {/* ─── 6. Settings (collapsed) ─── */}
+            {/* ─── 6. Settings ─── */}
             <details
-              className="rounded-xl border border-slate-800/40 bg-slate-950/40 overflow-hidden"
+              className="overflow-hidden rounded-xl border border-slate-800/40 bg-slate-950/40"
               open={settingsOpen}
               onToggle={(e) => setSettingsOpen(e.currentTarget.open)}
             >
@@ -557,7 +686,10 @@ export default function Dashboard() {
                 <span className="flex items-center gap-2">
                   <SlidersHorizontal size={13} /> Decision Settings
                 </span>
-                <ChevronDown size={14} className={`transition-transform ${settingsOpen ? "rotate-180" : ""}`} />
+                <ChevronDown
+                  size={14}
+                  className={`transition-transform ${settingsOpen ? "rotate-180" : ""}`}
+                />
               </summary>
               {settingsOpen && (
                 <div className="border-t border-slate-800/40 px-4 py-4">
@@ -566,20 +698,23 @@ export default function Dashboard() {
               )}
             </details>
 
-            {/* ─── 7. Research (collapsed) ─── */}
+            {/* ─── 7. Research ─── */}
             <details
-              className="rounded-xl border border-slate-800/40 bg-slate-950/40 overflow-hidden"
+              className="overflow-hidden rounded-xl border border-slate-800/40 bg-slate-950/40"
               open={researchOpen}
               onToggle={(e) => setResearchOpen(e.currentTarget.open)}
             >
               <summary className="flex cursor-pointer list-none items-center justify-between px-4 py-3 text-xs font-semibold text-slate-500">
                 <span className="flex items-center gap-2">
-                  <FlaskConical size={13} /> Research & Diagnostics
+                  <FlaskConical size={13} /> Research &amp; Diagnostics
                 </span>
-                <ChevronDown size={14} className={`transition-transform ${researchOpen ? "rotate-180" : ""}`} />
+                <ChevronDown
+                  size={14}
+                  className={`transition-transform ${researchOpen ? "rotate-180" : ""}`}
+                />
               </summary>
               {researchOpen && (
-                <div className="border-t border-slate-800/40 px-4 py-4 space-y-5">
+                <div className="space-y-5 border-t border-slate-800/40 px-4 py-4">
                   <OutcomeEvidence />
                   <RecentSignals />
                   <HistoricalOutcomes />

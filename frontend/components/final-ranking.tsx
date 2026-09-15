@@ -1,5 +1,5 @@
 import { AlertTriangle, Medal, ShieldCheck } from "lucide-react";
-import { asRecord } from "@/components/score-card";
+import { asRecord } from "@/lib/candidate";
 
 type Ranking = {
   version?: string;
