@@ -9,19 +9,24 @@ groups:
         annotations:
           summary: Waterfall backend is unreachable
       - alert: WaterfallBackendMemoryPressure
-        expr: process_resident_memory_bytes{job="waterfall-backend"} > 1610612736
+        # The backend container has no 2GiB memory limit. The old rule claimed
+        # it did and alerted at 1.5GiB, which was a made-up 75% ceiling. The
+        # host has 15GiB and normal backend RSS is about 1.1GiB, so 3GiB is a
+        # real, actionable process-pressure threshold while node-level OOM is
+        # covered separately by the host/swap monitors.
+        expr: process_resident_memory_bytes{job="waterfall-backend"} > 3221225472
         for: 5m
         labels:
           severity: critical
         annotations:
-          summary: Waterfall backend RSS exceeds 75% of its 2 GiB memory limit
+          summary: Waterfall backend RSS exceeds 3 GiB
       - alert: WaterfallBackendMemoryGrowth
-        expr: deriv(process_resident_memory_bytes{job="waterfall-backend"}[10m]) > 87381
+        expr: deriv(process_resident_memory_bytes{job="waterfall-backend"}[10m]) > 174763
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: Waterfall backend RSS is growing faster than 5 MiB/min
+          summary: Waterfall backend RSS is growing faster than 10 MiB/min
       - alert: WaterfallBackendRestarted
         expr: changes(process_start_time_seconds{job="waterfall-backend"}[10m]) > 0
         for: 1m
@@ -29,6 +34,40 @@ groups:
           severity: warning
         annotations:
           summary: Waterfall backend process restarted within the last 10 minutes
+      - alert: WaterfallCatalogueStale
+        # The catalogue refresh is 15 minutes. Twenty minutes permits network
+        # jitter but detects the six-hour sleep/failed-loop failure mode before
+        # a newly listed contract remains invisible for a trading session.
+        expr: time() - waterfall_catalog_last_refresh_timestamp > 1200
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: LBank catalogue has not refreshed for over 20 minutes
+      - alert: WaterfallHunterStalled
+        # The hunter normally emits progress continuously. A three-minute gap
+        # is long enough to tolerate slow REST/WS paths but short enough to
+        # detect an event-loop or SQLite lock stall before the dashboard ages.
+        expr: time() - waterfall_hunter_last_progress_timestamp > 180
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Waterfall hunter has made no progress for over 3 minutes
+      - alert: WaterfallNotificationOutboxStuck
+        expr: waterfall_notification_delivery_state_total{state=~"PENDING|RETRY_WAIT|SENDING"} > 0 and waterfall_notification_oldest_pending_age_seconds > 600
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Telegram notification outbox has a pending event older than 10 minutes
+      - alert: WaterfallNotificationDeadLetter
+        expr: waterfall_notification_delivery_state_total{state="DEAD_LETTER"} > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Telegram notification delivery reached dead letter state
       - alert: WaterfallWebSocketOrphanSubscriptions
         expr: waterfall_websocket_ccxt_subscriptions > waterfall_websocket_active_tasks + 3 * waterfall_websocket_shared_evidence_active_subscribers + 8
         for: 5m

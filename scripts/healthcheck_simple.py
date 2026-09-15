@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Simple healthcheck for standalone Docker containers."""
+"""Bounded healthcheck and recovery for the WaterfallHunter stack.
+
+This timer runs once per minute. It intentionally performs only one bounded
+restart attempt per unhealthy container and never runs compose, rebuilds an
+image, deletes data, or restarts the whole stack. The old implementation only
+checked ``.State.Running``: Docker marks a process as Running even when its
+healthcheck is ``unhealthy``, so the timer reported the stack healthy while a
+dependency was unusable.
+"""
 import subprocess
 import sys
 import json
@@ -10,13 +18,34 @@ CONTAINERS = [
     "waterfall-watchdog",
 ]
 
-def check_container(name):
+def container_state(name):
     try:
         result = subprocess.run(
-            ["docker", "inspect", name, "--format", "{{.State.Running}}"],
+            [
+                "docker", "inspect", name, "--format",
+                "{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}",
+            ],
             capture_output=True, text=True, timeout=5
         )
-        return result.returncode == 0 and result.stdout.strip() == "true"
+        if result.returncode != 0:
+            return "missing"
+        running, _, health = result.stdout.strip().partition("|")
+        if running != "true":
+            return "stopped"
+        # A container with no Docker healthcheck is running but unverified;
+        # it is not treated as a failure because there is no predicate to use.
+        return "healthy" if health in {"healthy", "none"} else health or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def restart_container(name):
+    try:
+        result = subprocess.run(
+            ["docker", "restart", "--time", "20", name],
+            capture_output=True, text=True, timeout=45,
+        )
+        return result.returncode == 0
     except Exception:
         return False
 
@@ -24,9 +53,9 @@ def main():
     all_ok = True
     status = {}
     for c in CONTAINERS:
-        running = check_container(c)
-        status[c] = "healthy" if running else "missing"
-        if not running:
+        state = container_state(c)
+        status[c] = state
+        if state != "healthy":
             all_ok = False
 
     # Also check backend health
@@ -54,15 +83,17 @@ def main():
     result = {
         "healthy": all_ok,
         "services": status,
-        "frontend_http": check_container("waterfall-frontend"),
+        "frontend_http": status.get("waterfall-frontend") == "healthy",
     }
 
     if not all_ok:
-        # Try to restart missing containers
+        # One bounded restart for a genuinely unhealthy/stopped container.
+        # Do not restart on "unknown": an inspect failure must not turn a
+        # transient Docker CLI problem into a destructive recovery loop.
         for name, state in status.items():
-            if state == "missing" and name in CONTAINERS:
-                print(f"Attempting restart of {name}...")
-                subprocess.run(["docker", "start", name], timeout=10)
+            if state in {"missing", "stopped", "unhealthy"} and name in CONTAINERS:
+                print(f"Attempting bounded restart of {name}...", file=sys.stderr)
+                result["services"][name] = f"{state}: restart_attempted={restart_container(name)}"
 
     print(json.dumps(result))
     sys.exit(0 if all_ok else 1)
