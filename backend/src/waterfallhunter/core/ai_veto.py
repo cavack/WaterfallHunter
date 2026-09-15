@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -37,6 +38,32 @@ class AICascadeOpinion:
             "provider": self.provider,
             "model": self.model,
             "raw": self.raw,
+        }
+
+    def to_observational_advisory(self) -> dict[str, Any]:
+        """Project the opinion onto the observational advisory contract.
+
+        Consumers (``EntryDecisionStore.append_advisory``,
+        ``dashboard_projection``, ``notifier``) read this dictionary shape, so
+        the opinion is never handed over as a dataclass instance. Both the
+        canonical flags (``observational_only``/``decision_mutated``) and the
+        legacy flags (``ai_observational_only``/``ai_decision_critical``) are
+        emitted so that every consumer keeps working.
+        """
+        available = self.provider == "ollama"
+        return {
+            "observational_only": True,
+            "decision_mutated": False,
+            "ai_observational_only": True,
+            "ai_decision_critical": False,
+            "ai_status": "AVAILABLE" if available else "UNAVAILABLE",
+            "ai_advice": ("NEUTRAL" if self.verified else "AVOID")
+            if available
+            else "UNAVAILABLE",
+            "ai_confidence": int(self.score) if available else 0,
+            "ai_reasoning": str(self.note),
+            "ai_provider": self.provider if available else "none",
+            "ai_model": self.model if available else "none",
         }
 
 
@@ -206,40 +233,145 @@ class AIVetoEngine:
     """Deterministic veto engine with Ollama AI advisory.
 
     Provides:
-    - evaluate_deterministic: fast deterministic check without AI
+    - evaluate_deterministic: provider-free market-data veto, no AI call
     - advisory_for_decision: async AI advisory from Ollama
+    - get_observational_advisory: async Ollama advisory without veto authority
+    - evaluate_symbol: compatibility API combining both
     """
 
     def __init__(self) -> None:
         self._intel = get_ai_intelligence()
+        self.max_bid_ask_ratio = 3.0
+
+    @staticmethod
+    def _observational_placeholder(reason: str) -> dict[str, Any]:
+        """Provider-free placeholder that satisfies the advisory contract."""
+        return {
+            "observational_only": True,
+            "decision_mutated": False,
+            "ai_observational_only": True,
+            "ai_decision_critical": False,
+            "deterministic_veto": False,
+            "deterministic_reason": None,
+            "ai_status": "UNAVAILABLE",
+            "ai_advice": "PENDING",
+            "ai_confidence": 0,
+            "ai_reasoning": reason,
+            "ai_provider": "none",
+            "ai_model": "none",
+        }
 
     def evaluate_deterministic(
         self,
         symbol: str,
         orderbook: dict[str, Any],
         ticker: dict[str, Any],
-    ) -> tuple[bool, AICascadeOpinion]:
-        """Deterministic evaluation without calling AI.
+    ) -> tuple[bool, dict[str, Any]]:
+        """Provider-free deterministic market-data veto.
 
-        Returns (vetoed, advisory) — no veto, let evaluation proceed.
+        Returns (vetoed, advisory) — AI is never consulted here. The advisory
+        is the observational dictionary contract so that
+        ``metrics["ai_advisory"]`` stays consumable by the entry-decision
+        reasons and the dashboard projection.
         """
-        return False, AICascadeOpinion(
-            verified=True,
-            note="Deterministic checks passed.",
-            score=0,
-            provider="none",
-            model="none",
-            raw={"reason": "passed"},
-        )
+        if not orderbook or not ticker:
+            logger.warning(
+                "SOFT WARNING [%s]: Missing real market data, but not vetoing.",
+                symbol,
+            )
+            return False, {
+                **self._observational_placeholder(
+                    "Insufficient market data for AI advisory"
+                ),
+                "deterministic_reason": "Missing real data (soft warning)",
+            }
+
+        bids = orderbook.get("bids", [])[:10]
+        asks = orderbook.get("asks", [])[:10]
+        bid_vol = sum(row[1] for row in bids) if bids else 0
+        ask_vol = sum(row[1] for row in asks) if asks else 0
+
+        deterministic_veto = False
+        veto_reason = "Approved by Deterministic Math"
+
+        if ask_vol == 0:
+            deterministic_veto = True
+            veto_reason = "No Ask liquidity available."
+        elif (bid_vol / ask_vol) > self.max_bid_ask_ratio:
+            deterministic_veto = True
+            veto_reason = (
+                f"Bid wall is {(bid_vol / ask_vol):.1f}x larger than Ask wall. "
+                "Long squeeze risk."
+            )
+
+        if deterministic_veto:
+            logger.warning("HARD VETO APPLIED for %s: %s", symbol, veto_reason)
+
+        return deterministic_veto, {
+            **self._observational_placeholder(
+                "AI advisory pending — runs asynchronously after signal persistence."
+            ),
+            "deterministic_veto": deterministic_veto,
+            "deterministic_reason": veto_reason,
+        }
 
     async def advisory_for_decision(
         self,
         symbol: str,
         metrics: dict[str, Any],
         decision: dict[str, Any],
-    ) -> AICascadeOpinion:
+    ) -> dict[str, Any]:
         """Get AI advisory from Ollama for the given metrics."""
-        return await self._intel.get_advisory(metrics)
+        opinion = await self._intel.get_advisory(metrics)
+        return opinion.to_observational_advisory()
+
+    async def get_observational_advisory(
+        self,
+        symbol: str,
+        orderbook: dict[str, Any],
+        ticker: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Fetch the Ollama advisory without granting it veto authority."""
+        opinion = await self._intel.get_advisory(
+            {
+                "symbol": symbol,
+                "orderbook": orderbook,
+                "ticker": ticker,
+            }
+        )
+        advisory = opinion.to_observational_advisory()
+        logger.info(
+            "Ollama Advisory [%s]: %s (Conf: %s%%) | Reason: %s",
+            symbol,
+            advisory["ai_advice"],
+            advisory["ai_confidence"],
+            advisory["ai_reasoning"],
+        )
+        return advisory
+
+    async def evaluate_symbol(
+        self,
+        symbol: str,
+        orderbook: dict[str, Any],
+        ticker: dict[str, Any],
+    ) -> tuple[bool, dict[str, Any]]:
+        """Compatibility API for callers that want the full advisory."""
+        deterministic_veto, advisory_data = self.evaluate_deterministic(
+            symbol,
+            orderbook,
+            ticker,
+        )
+        if not orderbook or not ticker:
+            return deterministic_veto, advisory_data
+
+        advisory_data.update(
+            await self.get_observational_advisory(
+                symbol,
+                orderbook,
+                ticker,
+            )
+        )
+        return deterministic_veto, advisory_data
 
     def status(self) -> dict[str, str]:
         """Return AI status for health checks."""
