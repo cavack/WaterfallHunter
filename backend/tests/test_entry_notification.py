@@ -230,6 +230,33 @@ def test_entry_ready_message_includes_lifecycle_state() -> None:
     assert "PRE-TRIGGER" in message
 
 
+def test_entry_ready_message_uses_immutable_execution_plan_facts() -> None:
+    packet = entry_packet()
+    packet["trade_plan"].update(
+        {
+            "stop_basis": "atr_floor",
+            "reference_divergence_pct": 0.31,
+            "margin_mode": "isolated",
+        }
+    )
+    packet["leverage_advisory"] = {
+        "status": "AVAILABLE",
+        "leverage": 8,
+        "margin_mode": "isolated",
+    }
+    packet["trade_plan"]["leverage"] = 8
+    payload = {
+        "contract_version": "entry_ready_notification_v1",
+        "symbol": "SXT/USDT:USDT",
+        "decision_packet": packet,
+    }
+    message = TelegramNotifier.build_entry_ready_message(payload)
+    assert "8× isolated" in message
+    assert "atr_floor" in message
+    assert "LBank divergence" in message
+    assert "0.310%" in message
+
+
 def test_telegram_transport_suppresses_overage_entry_ready_before_send(tmp_path, monkeypatch) -> None:
     import waterfallhunter.core.notifier as notifier_module
 

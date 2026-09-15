@@ -404,6 +404,20 @@ def _trade_plan(metrics: dict[str, Any]) -> dict[str, Any] | None:
         "reward_to_risk": _finite(setup.get("reward_to_risk")),
         "leverage": _finite(metrics.get("applied_leverage")),
     }
+    # These are execution facts captured when the plan was calculated. Carry
+    # them into the immutable decision packet so Telegram and the dashboard do
+    # not have to read a later, potentially changed live-metrics snapshot.
+    for key in (
+        "risk_pct",
+        "stop_basis",
+        "atr_pct",
+        "atr_stop_multiple",
+        "reference_divergence_pct",
+        "margin_mode",
+    ):
+        value = setup.get(key)
+        if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+            plan[key] = value
     expires_at = setup.get("expires_at")
     if isinstance(expires_at, int) and not isinstance(expires_at, bool) and expires_at >= 0:
         plan["expires_at"] = expires_at

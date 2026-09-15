@@ -47,6 +47,26 @@ def test_two_confirming_timeframes_carry_stronger_timing_provenance() -> None:
     assert reasons == ["TIMING_CONFIRMED", "TIMING_MULTI_CONFIRMED"]
 
 
+def test_trade_plan_preserves_execution_facts_for_immutable_delivery() -> None:
+    metrics = strong_metrics()
+    metrics["position_setup"].update(
+        {
+            "risk_pct": 2.1,
+            "stop_basis": "atr_floor",
+            "atr_pct": 1.4,
+            "atr_stop_multiple": 1.2,
+            "reference_divergence_pct": 0.31,
+            "margin_mode": "isolated",
+        }
+    )
+    packet = decide(metrics)
+    plan = packet["trade_plan"]
+    assert plan["stop_basis"] == "atr_floor"
+    assert plan["atr_stop_multiple"] == 1.2
+    assert plan["reference_divergence_pct"] == 0.31
+    assert plan["margin_mode"] == "isolated"
+
+
 # ---------------------------------------------------------------------------
 # Unrecorded calibration drift
 #

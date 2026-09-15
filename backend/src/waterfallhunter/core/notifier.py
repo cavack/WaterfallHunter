@@ -434,7 +434,8 @@ class TelegramNotifier:
             else None
         )
         if leverage_status == "AVAILABLE" and leverage_value is not None:
-            leverage_text = f"{leverage_value:.0f}×"
+            margin_mode = str(leverage_advisory.get("margin_mode") or plan.get("margin_mode") or "isolated")
+            leverage_text = f"{leverage_value:.0f}× {margin_mode}"
         elif leverage_status in {"UNAVAILABLE", "NOT_RECOMMENDED"}:
             leverage_text = leverage_status.replace("_", " ")
         elif leverage_value is not None:
@@ -453,13 +454,14 @@ class TelegramNotifier:
             f"📦 Evidence coverage: <b>{cls._number(packet.get('evidence_coverage_pct'), 1)}%</b>",
             "",
             f"🎯 Entry: <b>${cls._number(plan.get('entry_price'), 8)}</b>",
-            f"🛑 SL: <b>${cls._number(plan.get('stop_loss'), 8)}</b>",
+            f"🛑 SL: <b>${cls._number(plan.get('stop_loss'), 8)}</b> · {escape(str(plan.get('stop_basis') or 'structural'))}",
             f"💰 TP1 / TP2 / TP3: <b>${cls._number(plan.get('take_profit_1'), 8)}</b> / <b>${cls._number(plan.get('take_profit_2'), 8)}</b> / <b>${cls._number(plan.get('take_profit_3'), 8)}</b>",
             f"⚖️ Leverage: <b>{escape(leverage_text)}</b>",
             "",
             f"📉 OI 1h: <b>{cls._number(derivatives.get('oi_change_1h_pct'), 3)}%</b> · Funding: <b>{cls._number(derivatives.get('funding_rate_pct'), 4)}%</b>",
             f"🔻 Taker B/S: <b>{cls._number(flow.get('taker_buy_sell_ratio'), 3)}</b> · Sell share: <b>{cls._number(flow.get('sell_share_pct'), 1)}%</b>",
             f"💥 Cascade: <b>{escape(str(cascade.get('status') or 'UNAVAILABLE'))}</b> · {cls._number(cascade.get('readiness_points'), 1)}/10",
+            f"📚 Spread: <b>{cls._number((evidence.get('execution') or {}).get('spread_pct'), 3)}%</b> · LBank divergence: <b>{cls._number(plan.get('reference_divergence_pct'), 3)}%</b>",
         ]
         advisory = payload.get("ai_advisory") if isinstance(payload.get("ai_advisory"), dict) else {}
         if advisory.get("ai_status") == "AVAILABLE":
