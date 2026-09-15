@@ -317,6 +317,7 @@ export default function Dashboard() {
   const [freshnessNow, setFreshnessNow] = useState<number | undefined>(undefined);
   const [researchOpen, setResearchOpen] = useState(false);
   const latestVersion = useRef(0);
+  const latestGeneratedAt = useRef(0);
   const lastStreamEventAt = useRef(0);
 
   useEffect(() => {
@@ -334,8 +335,16 @@ export default function Dashboard() {
     const stream = new EventSource("/dashboard/api/stream");
 
     const accept = (snapshot: DashboardSnapshot) => {
-      if (!active || snapshot.snapshot_version <= latestVersion.current) return;
+      if (!active) return;
+      // Version is monotonic within one backend process. After a backend
+      // restart the counter can legitimately fall below what this tab has
+      // already seen, so a newer generated_at must also win — otherwise the
+      // tab silently ignores every snapshot until a manual reload.
+      const newerVersion = snapshot.snapshot_version > latestVersion.current;
+      const newerClock = snapshot.generated_at > latestGeneratedAt.current;
+      if (!newerVersion && !newerClock) return;
       latestVersion.current = snapshot.snapshot_version;
+      latestGeneratedAt.current = snapshot.generated_at;
       hasSnapshot = true;
       setData(snapshot);
       setGeneratedAt(snapshot.generated_at * 1000);

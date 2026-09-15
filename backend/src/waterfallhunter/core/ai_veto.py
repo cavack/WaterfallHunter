@@ -118,10 +118,14 @@ class AICascadeIntelligence:
                 "Invalid AI advisory payload."
             )
 
-    async def get_advisory(self, metrics: dict[str, Any]) -> AICascadeOpinion:
+    async def get_advisory(
+        self,
+        metrics: dict[str, Any],
+        decision: dict[str, Any] | None = None,
+    ) -> AICascadeOpinion:
         """Fetch AI advisory from Ollama only."""
         try:
-            prompt = self._build_prompt(metrics)
+            prompt = self._build_prompt(metrics, decision)
             raw = await self._request_ollama(prompt)
             if raw is None:
                 return self._unavailable_advisory("Ollama request failed.")
@@ -155,35 +159,85 @@ class AICascadeIntelligence:
             logger.exception("AI advisory error: %s", exc)
             return self._unavailable_advisory(f"Ollama unavailable ({type(exc).__name__}).")
 
-    def _build_prompt(self, metrics: dict[str, Any]) -> str:
-        """Build the analysis prompt for Ollama."""
-        score = metrics.get("readiness_score", 0)
-        coverage = metrics.get("coverage_score", 0)
-        symbol = metrics.get("symbol", "UNKNOWN")
-        structure = metrics.get("structure_status", "UNKNOWN")
-        cascade = metrics.get("cascade_status", "FAIL")
-        signal = metrics.get("signal_summary", {})
-        entry_price = signal.get("entry_price", "N/A")
-        stop_loss = signal.get("stop_loss", "N/A")
-        take_profit = signal.get("take_profit", "N/A")
+    @staticmethod
+    def _fmt(value: Any, digits: int = 4, suffix: str = "") -> str:
+        if isinstance(value, bool) or value is None:
+            return "n/a"
+        if isinstance(value, (int, float)):
+            if value != value or value in (float("inf"), float("-inf")):
+                return "n/a"
+            return f"{value:.{digits}f}{suffix}"
+        text = str(value).strip()
+        return text if text else "n/a"
 
-        prompt = f"""You are a crypto trading analyst. Analyze this signal and respond with JSON only.
+    def _build_prompt(
+        self,
+        metrics: dict[str, Any],
+        decision: dict[str, Any] | None = None,
+    ) -> str:
+        """Build the analysis prompt from the canonical decision packet.
+
+        The previous prompt read ``readiness_score`` / ``coverage_score`` /
+        ``structure_status`` / ``cascade_status`` / ``signal_summary``. None of
+        those keys are produced anywhere, so every request told the model
+        "Readiness 0/100, Cascade FAIL, Entry N/A" and the model correctly
+        answered that the signal carried no information. This version reads
+        the fields ``build_entry_decision`` and the validator actually emit.
+        """
+        packet = decision if isinstance(decision, dict) else {}
+        if not packet:
+            candidate = metrics.get("entry_decision")
+            packet = candidate if isinstance(candidate, dict) else {}
+
+        def rec(value: Any) -> dict[str, Any]:
+            return value if isinstance(value, dict) else {}
+
+        symbol = str(metrics.get("symbol") or packet.get("symbol") or "UNKNOWN")
+        readiness = packet.get("entry_readiness")
+        coverage = packet.get("evidence_coverage_pct")
+        decision_label = str(packet.get("decision") or "UNAVAILABLE")
+        lifecycle = str(packet.get("lifecycle_state") or metrics.get("status") or "n/a")
+        reasons = packet.get("reason_codes")
+        reason_text = ", ".join(str(r) for r in reasons[:10]) if isinstance(reasons, list) and reasons else "none"
+        blocks = packet.get("block_reasons")
+        block_text = ", ".join(str(b) for b in blocks) if isinstance(blocks, list) and blocks else "none"
+
+        cascade = rec(metrics.get("cascade_intelligence"))
+        evidence = rec(packet.get("evidence_summary"))
+        ev_deriv = rec(evidence.get("derivatives"))
+        ev_flow = rec(evidence.get("order_flow"))
+        ev_exec = rec(evidence.get("execution"))
+        plan = rec(packet.get("trade_plan"))
+        candles = rec(metrics.get("candle_features"))
+        h4 = rec(candles.get("4h"))
+        h1 = rec(candles.get("1h"))
+
+        f = self._fmt
+        prompt = f"""You are reviewing a SHORT (sell) setup produced by a rules-based engine for a perpetual futures market. The engine has already decided; your role is an independent second opinion that is logged next to the decision and never overrides it.
 
 Symbol: {symbol}
-Readiness Score: {score}/100
-Coverage Score: {coverage}/100
-Structure: {structure}
-Cascade: {cascade}
-Entry: {entry_price}
-Stop Loss: {stop_loss}
-Take Profit: {take_profit}
+Engine decision: {decision_label} (lifecycle {lifecycle})
+Readiness: {f(readiness, 1)}/100 with {f(coverage, 1)}% of evidence available
+Hard blocks: {block_text}
+Reason codes: {reason_text}
 
-Respond with ONLY this JSON format (no other text):
-{{"verified": true/false, "note": "brief analysis", "score": 0-100}}
+Cascade (liquidation/flow composite): {f(cascade.get("status"))} - {f(cascade.get("readiness_points"), 1)}/{f(cascade.get("maximum_available"), 1)} points
+Order flow: taker buy/sell ratio {f(ev_flow.get("taker_buy_sell_ratio"), 3)} (below 1.0 = sellers dominate), sell share {f(ev_flow.get("sell_share_pct"), 1, "%")}
+Derivatives: OI change 1h {f(ev_deriv.get("oi_change_1h_pct"), 2, "%")}, funding {f(ev_deriv.get("funding_rate_pct"), 4, "%")}
+Execution: spread {f(ev_exec.get("spread_pct"), 3, "%")}
+Cross-exchange breakdown confirmed: {f(evidence.get("cross_exchange_confirmed"))}
+Extension from support: {f(evidence.get("anti_chase_extension_atr"), 2)} ATR (large = chasing)
+4h structure: lower_high={f(h4.get("lower_high"))} failed_pullback={f(h4.get("setup") == "FAILED_PULLBACK")} bearish_close={f(h4.get("bearish_close"))}
+1h timing: lower_high={f(h1.get("lower_high"))} rsi_rollover={f(h1.get("rsi_rollover"))} bearish_close={f(h1.get("bearish_close"))}
 
-"verified" = true if the signal is tradeable, false if not.
-"score" = your confidence 0-100.
-"note" = one sentence explanation.
+Trade plan: entry {f(plan.get("entry_price"), 6)}, stop {f(plan.get("stop_loss"), 6)}, TP1 {f(plan.get("take_profit_1"), 6)}, TP2 {f(plan.get("take_profit_2"), 6)}, reward:risk {f(plan.get("reward_to_risk"), 2)}
+
+Respond with ONLY this JSON (no prose before or after):
+{{"verified": true or false, "note": "one sentence naming the strongest reason for or against this short", "score": 0-100}}
+
+"verified" is true only if you agree the short thesis is supported by the evidence above.
+"score" is your confidence in that judgement, 0-100.
+If the engine decision is NO_TRADE or a hard block is present, explain whether you agree with the block rather than re-litigating the entry.
 """
         return prompt
 
@@ -348,7 +402,10 @@ class AIVetoEngine:
         decision: dict[str, Any],
     ) -> dict[str, Any]:
         """Get AI advisory from Ollama for the given metrics."""
-        opinion = await self._intel.get_advisory(metrics)
+        opinion = await self._intel.get_advisory(
+            {**metrics, "symbol": symbol},
+            decision,
+        )
         return opinion.to_observational_advisory()
 
     async def get_observational_advisory(

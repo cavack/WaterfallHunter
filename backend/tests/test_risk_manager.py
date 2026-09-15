@@ -19,8 +19,12 @@ def _metrics(
     exit_slippage=None,
     maximum_leverage=None,
 ):
+    # ``score`` is the retired Gen-1 key; the leverage policy now bounds on the
+    # canonical ``entry_decision.entry_readiness``. The parameter name is kept
+    # so the existing cases read the same, but it is mapped onto the readiness
+    # band (70 floor, 95 ceiling) that the live policy uses.
     return {
-        "score": score,
+        "entry_decision": {"entry_readiness": score},
         "position_setup": {"entry_price": entry, "stop_loss": stop},
         "candle_features": {
             "5m": {"atr_pct": atr_pct},
@@ -117,8 +121,8 @@ def test_advisory_carries_complete_normalized_causal_input_packet():
         {"available": True, "status": "MARGINAL", "maximum_leverage": 10, "observed_samples": 55},
     )
     causal = advisory["causal_input"]
-    assert advisory["policy_version"] == "adaptive_signal_leverage_v2"
-    assert causal["score"] == 92.0
+    assert advisory["policy_version"] == "adaptive_signal_leverage_v3"
+    assert causal["entry_readiness"] == 92.0
     assert causal["position_setup"] == {"status": "", "entry_price": 100.0, "stop_loss": 102.0}
     assert causal["microstructure"] == {
         "spread_pct": 0.04, "slippage_pct": 0.06,
@@ -161,14 +165,15 @@ def test_adaptive_leverage_advisory_available_uses_canonical_policy():
     advisory = build_signal_leverage_advisory(_metrics(), {"status": "SUITABLE"})
     assert advisory["status"] == "AVAILABLE"
     assert advisory["leverage"] == 18
-    assert advisory["policy_version"] == "adaptive_signal_leverage_v2"
+    assert advisory["policy_version"] == "adaptive_signal_leverage_v3"
+    assert advisory["margin_mode"] == "isolated"
 
 
 def test_adaptive_leverage_advisory_missing_inputs_is_unavailable_without_fallback():
     advisory = build_signal_leverage_advisory({"score": None}, {"status": "SUITABLE"})
     assert advisory["status"] == "UNAVAILABLE"
     assert advisory["leverage"] is None
-    assert "strict finite score" in advisory["reason"]
+    assert "entry readiness" in advisory["reason"]
 
 
 def test_adaptive_leverage_advisory_below_four_is_not_recommended_without_clamp():
@@ -204,12 +209,15 @@ def test_unexpected_adaptive_calculator_failure_is_explicitly_unavailable(monkey
 
 
 def test_complete_low_score_is_not_recommended_not_unavailable():
+    # Below the actionable readiness floor (70), leverage is a policy refusal,
+    # not missing evidence.
     advisory = build_signal_leverage_advisory(
-        _metrics(score=84.0),
+        _metrics(score=64.0),
         {"status": "SUITABLE", "evidence_status": "SUFFICIENT", "observed_samples": 40},
     )
     assert advisory["status"] == "NOT_RECOMMENDED"
     assert advisory["leverage"] is None
+    assert "below the actionable floor" in advisory["reason"]
 
 
 def test_rejected_position_setup_is_not_recommended_not_available():

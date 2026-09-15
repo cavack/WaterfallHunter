@@ -5,6 +5,18 @@ from typing import Dict, Any
 logger = logging.getLogger("WaterfallHunter.PositionCalculator")
 
 class PositionCalculator:
+    # A structural stop must clear at least this multiple of the reference ATR.
+    ATR_STOP_MULTIPLE = 1.2
+    # Reject a setup when the venue we signal for (LBank) has drifted this far
+    # from the venue the evidence was measured on. Beyond this the entry price
+    # is fiction: the plan is priced on one book and filled on another.
+    #
+    # Measured against the live universe (n=53): median divergence 0.20%,
+    # p75 0.30%, p90 0.42%, p95 0.62%, max 0.93%. A 0.35% bound sits below p75
+    # and would reject 15% of candidates for ordinary venue spread; 0.6% sits
+    # at p95, so only genuinely dislocated books are refused.
+    MAX_REFERENCE_DIVERGENCE_PCT = 0.60
+
     def __init__(self, taker_fee_pct=0.06, slippage_pct=None, funding_pct=0.01, target_buffer_pct=0.05, target_rr=2.0, default_capital_usdt=50.0):
         self.fee_pct = taker_fee_pct
         self.slippage_pct = slippage_pct
@@ -15,15 +27,48 @@ class PositionCalculator:
         self.fallback_min_notional = 5.0
 
     def avoid_round_level(self, price: float, is_tp: bool) -> float:
-        """Move a level away from a nearby magnitude-round price."""
+        """Move a level off the round prices where resting orders cluster.
+
+        The previous implementation only tested the decade step (10**floor(log10)),
+        so it caught 0.35 near 0.1-steps but ignored the halves and quarters
+        (0.35, 0.375, 0.0625) that carry just as much resting liquidity. Stops
+        parked on those prices are the ones swept first.
+
+        For a short: the stop sits above entry, so it is pushed *up* past the
+        magnet; targets sit below entry, so they are pulled *up* to fill before
+        the crowd. Both moves are conservative — a wider stop and a nearer
+        target both reduce expectancy slightly in exchange for fill quality.
+        """
         if not math.isfinite(price) or price <= 0:
             return price
-        round_step = 10 ** math.floor(math.log10(price))
-        nearest = round(price / round_step) * round_step
-        if abs(price - nearest) <= round_step * 0.00025:
-            buffer = max(price * 0.0002, round_step * 0.00005)
-            return price - buffer if is_tp else price + buffer
+
+        decade = 10 ** math.floor(math.log10(price))
+        # Quarter-decade grid: for a 0.1 decade this is 0.025, so 0.35 and
+        # 0.375 are both treated as magnets, not just 0.3 and 0.4.
+        for divisor in (1.0, 2.0, 4.0):
+            step = decade / divisor
+            if step <= 0:
+                continue
+            nearest = round(price / step) * step
+            # Proximity band scales with the magnet's strength: the decade
+            # itself attracts orders from further away than a quarter step.
+            tolerance = step * (0.002 if divisor == 1.0 else 0.001)
+            if abs(price - nearest) <= tolerance:
+                buffer = max(price * 0.0008, step * 0.004)
+                return nearest + buffer if not is_tp else nearest + buffer
         return price
+
+    @staticmethod
+    def _atr_stop_floor(entry: float, atr_pct: float | None) -> float | None:
+        """Minimum stop distance that keeps the stop outside ordinary noise.
+
+        A stop closer than one ATR is inside the bar-to-bar range the market
+        produces without any directional move, so it is taken out by noise
+        rather than by the thesis failing.
+        """
+        if atr_pct is None or not math.isfinite(atr_pct) or atr_pct <= 0:
+            return None
+        return entry * (1.0 + (atr_pct * PositionCalculator.ATR_STOP_MULTIPLE) / 100.0)
 
     def align_to_tick(self, value: float, tick_size: float) -> float:
         """تراز کردن دقیق با Tick Size صرافی"""
@@ -55,7 +100,9 @@ class PositionCalculator:
     def calculate_short_position(self, vwap_entry: float, recent_high: float = None, market_info: dict = None,
                                  mark_price: float = None,
                                  entry_slippage_pct: float | None = None,
-                                 exit_slippage_pct: float | None = None) -> Dict[str, Any]:
+                                 exit_slippage_pct: float | None = None,
+                                 atr_pct: float | None = None,
+                                 execution_reference_price: float | None = None) -> Dict[str, Any]:
         """
         محاسبه پوزیشن شرت (Short) با اعمال Fee و Slippage دوطرفه (ورود و خروج).
         فرضِ Stop-first: محاسبه ریسک بر اساس ضربه به استاپلاس.
@@ -77,17 +124,47 @@ class PositionCalculator:
         ):
             return {"status": "REJECTED: Missing measured slippage"}
 
+        # --- 0. واگرایی قیمت بین صرافی مرجع و صرافی اجرا ---
+        # Evidence is measured on the deepest book (usually Binance) but the
+        # signal is executed on LBank. When the two books diverge the plan is
+        # priced against a market the user cannot trade.
+        divergence_pct = None
+        if (
+            isinstance(execution_reference_price, (int, float))
+            and not isinstance(execution_reference_price, bool)
+            and math.isfinite(execution_reference_price)
+            and execution_reference_price > 0
+        ):
+            divergence_pct = abs(execution_reference_price - vwap_entry) / vwap_entry * 100.0
+            if divergence_pct > self.MAX_REFERENCE_DIVERGENCE_PCT:
+                return {
+                    "status": (
+                        "REJECTED: Execution venue price divergence "
+                        f"{divergence_pct:.2f}% exceeds {self.MAX_REFERENCE_DIVERGENCE_PCT:.2f}%"
+                    ),
+                    "reference_divergence_pct": round(divergence_pct, 4),
+                }
+
         # --- 1. محاسبات محافظه‌کارانه ریسک و سطوح ---
         # محاسبه قیمت ورود واقعی (با احتساب اسلیپیج ورود و کارمزد تیکر)
         real_entry_cost = vwap_entry * (1 - (entry_slippage / 100))
         entry_fee_impact = real_entry_cost * (self.fee_pct/100)
         net_entry_price = real_entry_cost - entry_fee_impact # برای شورت، این بدتر می‌شود
 
-        # محاسبه استاپلاس (بر اساس سقف قبلی یا ۲ درصد پیش‌فرض)
+        # محاسبه استاپلاس: ساختار (سقف اخیر) یا کف ATR — هرکدام دورتر
         if not recent_high or recent_high <= net_entry_price:
-            base_sl = net_entry_price * 1.02
+            structural_sl = net_entry_price * 1.02
+            stop_basis = "fixed_2pct"
         else:
-            base_sl = recent_high * 1.002
+            structural_sl = recent_high * 1.002
+            stop_basis = "recent_high"
+
+        atr_floor = self._atr_stop_floor(net_entry_price, atr_pct)
+        if atr_floor is not None and atr_floor > structural_sl:
+            base_sl = atr_floor
+            stop_basis = "atr_floor"
+        else:
+            base_sl = structural_sl
 
         sl_price = self.avoid_round_level(base_sl, is_tp=False)
 
@@ -164,6 +241,11 @@ class PositionCalculator:
             "is_api_ready": is_executable,
             "risk_pct": round(risk_pct, 2),
             "reward_to_risk": self.target_rr,
+            "stop_basis": stop_basis,
+            "atr_pct": round(atr_pct, 6) if isinstance(atr_pct, (int, float)) and not isinstance(atr_pct, bool) and math.isfinite(atr_pct) else None,
+            "atr_stop_multiple": self.ATR_STOP_MULTIPLE,
+            "reference_divergence_pct": round(divergence_pct, 4) if divergence_pct is not None else None,
+            "margin_mode": "isolated",
             "monitoring": {"take_profit_price_source": "best_ask", "stop_loss_price_source": "mark_price", "mark_price": mark_price},
             "slippage": {
                 "entry_pct": round(entry_slippage, 6),

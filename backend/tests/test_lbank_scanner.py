@@ -383,7 +383,10 @@ def test_scan_eligibility_change_resets_stale_candidate_state(
     )
 
 
-def test_background_catalogue_default_interval_is_six_hours():
+def test_background_catalogue_default_interval_is_fifteen_minutes():
+    # Six hours left newly listed contracts invisible for most of a trading
+    # day. The refresh is cheap (one REST call), so the bound is latency to
+    # first evaluation, not API budget.
     scanner = LBankCatalogScanner(
         db_adapter=None
     )
@@ -395,7 +398,7 @@ def test_background_catalogue_default_interval_is_six_hours():
     )
 
     assert defaults == (
-        21_600,
+        900,
     )
 
 

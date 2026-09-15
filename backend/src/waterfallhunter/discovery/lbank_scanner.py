@@ -708,18 +708,29 @@ class LBankCatalogScanner:
 
     async def start_background_scanner(
         self,
-        interval_seconds: int = 21_600,
+        interval_seconds: int = 900,
     ):
         """
         Canonical LBank catalogue refresh.
 
-        Default: exactly six hours.
+        Default: fifteen minutes. The previous six-hour period meant a newly
+        listed contract stayed invisible for up to six hours, and the operator
+        had no way to tell a sleeping scanner from a broken one because the
+        loop logged nothing on success.
         """
         self._is_running = True
 
         while self._is_running:
+            started_at = time.monotonic()
             try:
                 await self.update_catalog()
+                logger.info(
+                    "LBank catalogue refreshed in %.1fs: %d active contracts; "
+                    "next refresh in %ds",
+                    time.monotonic() - started_at,
+                    len(self.active_candidates),
+                    interval_seconds,
+                )
 
             except Exception as exc:
                 logger.exception(

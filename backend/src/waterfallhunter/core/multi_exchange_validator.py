@@ -131,6 +131,28 @@ class MultiExchangeValidator:
         if isinstance(sources, dict):
             sources["liquidations"] = f"{exchange_name}:public_ws"
 
+    @classmethod
+    def _stop_reference_atr_pct(cls, metrics: dict[str, Any] | None) -> float | None:
+        """Return the ATR% the structural stop must clear.
+
+        The 15m ATR is the reference: 5m is noisy enough that a 1.2x multiple
+        still sits inside ordinary chop, while 1h would push stops so wide that
+        the resulting leverage bound collapses below 4x.
+        """
+        if not isinstance(metrics, dict):
+            return None
+        features = metrics.get("candle_features")
+        if not isinstance(features, dict):
+            return None
+        for timeframe in ("15m", "5m", "1h"):
+            packet = features.get(timeframe)
+            if not isinstance(packet, dict):
+                continue
+            value = packet.get("atr_pct")
+            if cls._finite_positive(value):
+                return float(value)
+        return None
+
     def _position_setup_from_candle_capture(
         self,
         *,
@@ -138,6 +160,8 @@ class MultiExchangeValidator:
         ticker: dict[str, Any],
         microstructure: dict[str, Any],
         market_info: dict[str, Any],
+        metrics: dict[str, Any] | None = None,
+        execution_reference_price: float | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         source_capture = (
             candle_results.get("source_capture")
@@ -194,6 +218,8 @@ class MultiExchangeValidator:
             mark_price=mark_price,
             entry_slippage_pct=microstructure.get("entry_slippage_pct"),
             exit_slippage_pct=microstructure.get("exit_slippage_pct"),
+            atr_pct=self._stop_reference_atr_pct(metrics),
+            execution_reference_price=execution_reference_price,
         )
         return setup, capture, reference
 
@@ -305,6 +331,7 @@ class MultiExchangeValidator:
             ticker=ticker,
             microstructure=microstructure,
             market_info=market_info,
+            metrics=metrics,
         )
         calculator_status = str(setup.get("status") or "REJECTED: Missing calculator status")
         feasible = calculator_status == "READY"
@@ -330,6 +357,7 @@ class MultiExchangeValidator:
         ticker: dict[str, Any],
         microstructure: dict[str, Any],
         market_info: dict[str, Any],
+        execution_reference_price: float | None = None,
     ) -> str:
         if status not in {"FUEL-RICH", "PRE-TRIGGER", "ARMED", "TRIGGERED"}:
             return status
@@ -338,6 +366,8 @@ class MultiExchangeValidator:
             ticker=ticker,
             microstructure=microstructure,
             market_info=market_info,
+            metrics=metrics,
+            execution_reference_price=execution_reference_price,
         )
         metrics.setdefault("source_capture", {})["position"] = capture
         metrics["position_reference_price"] = reference
@@ -2855,6 +2885,7 @@ class MultiExchangeValidator:
                     ticker=ticker,
                     microstructure=microstructure,
                     market_info=market_info,
+                    execution_reference_price=reference_price,
                 )
                 return finish_runtime(
                     {
@@ -2915,6 +2946,7 @@ class MultiExchangeValidator:
             ticker=ticker,
             microstructure=microstructure,
             market_info=market_info,
+            execution_reference_price=reference_price,
         )
 
         return finish_runtime(

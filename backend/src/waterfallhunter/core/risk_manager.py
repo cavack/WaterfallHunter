@@ -26,7 +26,36 @@ class LeverageNotRecommendedError(ValueError):
     """Complete inputs imply that leverage of at least 4x is not recommended."""
 
 
-LEVERAGE_POLICY_VERSION = "adaptive_signal_leverage_v2"
+LEVERAGE_POLICY_VERSION = "adaptive_signal_leverage_v3"
+
+# Leverage is bounded by the canonical entry readiness, not the retired
+# Gen-1 ``metrics["score"]``. v2 read ``score`` (None on every live packet
+# since the ScoreV2 merge stopped populating it) and rejected 1,641 of 1,646
+# ENTRY_READY packets with "strict finite score required". The score bound
+# was also calibrated for the old TRIGGERED>=85 scale; readiness>=78 occurred
+# once in 276k evaluations, so the ramp is re-anchored to the band that
+# actually produces actionable decisions.
+LEVERAGE_MIN = 4
+LEVERAGE_MAX = 18
+READINESS_FLOOR = 70.0  # EntryDecisionPolicy.entry_ready_minimum
+READINESS_CEILING = 95.0
+
+
+def _readiness_bound(readiness: float) -> int:
+    """Map readiness in [floor, ceiling] linearly onto [4, 18]."""
+    span = READINESS_CEILING - READINESS_FLOOR
+    ratio = (readiness - READINESS_FLOOR) / span if span > 0 else 0.0
+    ratio = max(0.0, min(1.0, ratio))
+    return int(math.floor(LEVERAGE_MIN + ratio * (LEVERAGE_MAX - LEVERAGE_MIN)))
+
+
+def _canonical_readiness(metrics: Dict[str, Any]) -> float | None:
+    decision = metrics.get("entry_decision")
+    if isinstance(decision, dict):
+        value = _finite_number(decision.get("entry_readiness"))
+        if value is not None:
+            return value
+    return _finite_number(metrics.get("entry_readiness"))
 
 
 def _normalized_leverage_causal_input(
@@ -47,7 +76,7 @@ def _normalized_leverage_causal_input(
 
     available = suitability.get("available")
     return {
-        "score": _finite_number(source.get("score")),
+        "entry_readiness": _canonical_readiness(source),
         "position_setup": {
             "status": str(position.get("status") or "").upper(),
             "entry_price": _finite_number(position.get("entry_price")),
@@ -85,7 +114,7 @@ def recommend_signal_leverage(
     if not isinstance(metrics, dict):
         raise LeverageUnavailableError("signal metrics unavailable for leverage")
 
-    score = _finite_number(metrics.get("score"))
+    readiness = _canonical_readiness(metrics)
     position = metrics.get("position_setup") if isinstance(metrics.get("position_setup"), dict) else {}
     entry = _finite_number(position.get("entry_price"))
     stop = _finite_number(position.get("stop_loss"))
@@ -96,8 +125,8 @@ def recommend_signal_leverage(
     raw_exit_slippage = micro.get("exit_slippage_pct")
     exit_slippage = _finite_number(raw_exit_slippage)
 
-    if score is None or score < 0.0 or score > 100.0:
-        raise LeverageUnavailableError("strict finite score required for leverage")
+    if readiness is None or readiness < 0.0 or readiness > 100.0:
+        raise LeverageUnavailableError("canonical entry readiness required for leverage")
     if entry is None or stop is None or entry <= 0 or stop <= entry:
         raise LeverageUnavailableError("valid short entry and structural stop required for leverage")
     if (
@@ -126,7 +155,7 @@ def recommend_signal_leverage(
     atr_pct = max(atr_values)
     friction_pct = max(spread, slippage, exit_slippage or slippage)
 
-    score_bound = math.floor(4.0 + ((score - 85.0) / 15.0) * 14.0)
+    readiness_bound = _readiness_bound(readiness)
     stop_bound = math.floor(36.0 / stop_distance_pct)
     volatility_bound = math.floor(18.0 / (1.0 + max(atr_pct - 0.5, 0.0) / 2.5))
 
@@ -155,8 +184,10 @@ def recommend_signal_leverage(
     position_status = str(position.get("status") or "").upper()
     if position_status.startswith("REJECTED"):
         raise LeverageNotRecommendedError("position setup rejected by execution constraints")
-    if score < 85.0:
-        raise LeverageNotRecommendedError("complete evidence score implies leverage below 4x")
+    if readiness < READINESS_FLOOR:
+        raise LeverageNotRecommendedError(
+            f"entry readiness {readiness:.1f} is below the actionable floor {READINESS_FLOOR:.0f}"
+        )
 
     constraints = (
         metrics.get("market_constraints")
@@ -168,8 +199,8 @@ def recommend_signal_leverage(
         exchange_max = _finite_number(suitability.get("maximum_leverage"))
     exchange_bound = math.floor(exchange_max) if exchange_max is not None and exchange_max > 0 else 18
 
-    raw = min(18, score_bound, stop_bound, volatility_bound, execution_bound, suitability_bound, exchange_bound)
-    if raw < 4:
+    raw = min(LEVERAGE_MAX, readiness_bound, stop_bound, volatility_bound, execution_bound, suitability_bound, exchange_bound)
+    if raw < LEVERAGE_MIN:
         raise LeverageNotRecommendedError("independent risk bound requires leverage below 4x")
     return int(raw)
 
@@ -189,8 +220,9 @@ def build_signal_leverage_advisory(
     normalized_decision = str(decision_status or "").upper() or None
     base = {
         "policy_version": LEVERAGE_POLICY_VERSION,
-        "minimum": 4,
-        "maximum": 18,
+        "minimum": LEVERAGE_MIN,
+        "maximum": LEVERAGE_MAX,
+        "margin_mode": "isolated",
         "symbol_agnostic": True,
         "signal_only": True,
         "advisory_only": True,

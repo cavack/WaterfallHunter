@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import threading
+import time
 from collections import deque
 from typing import Any, Literal
 
@@ -13,6 +14,11 @@ from waterfallhunter.core.signal_metadata import canonical_sha256
 
 
 DASHBOARD_SCHEMA_VERSION = "2.0"
+# Head-room for snapshot sequence numbers within one epoch second. The
+# broadcaster publishes at most a few snapshots per second, so a million is
+# generous while keeping versions inside JavaScript's safe-integer range for
+# any plausible epoch (2^53 / 1e6 ≈ 9e9 seconds ≈ year 2255).
+_SNAPSHOTS_PER_EPOCH_SECOND = 1_000_000
 DASHBOARD_SNAPSHOT_CONTRACT = "dashboard_snapshot_v2"
 DASHBOARD_EVENT_CONTRACT = "dashboard_stream_event_v2"
 _VOLATILE_CANDIDATE_AGE_KEYS = frozenset(
@@ -222,14 +228,27 @@ def serialize_sse_event(event: DashboardStreamEvent) -> str:
 class DashboardEventBuffer:
     """Thread-safe monotonic event sequencer with bounded in-memory replay."""
 
-    def __init__(self, *, replay_limit: int = 100):
+    def __init__(self, *, replay_limit: int = 100, epoch: int = 0):
         if replay_limit < 1:
             raise ValueError("replay_limit must be positive")
+        if epoch < 0:
+            raise ValueError("epoch must be non-negative")
         self._events: deque[DashboardStreamEvent] = deque(maxlen=replay_limit)
         self._event_sequence = 0
-        self._snapshot_sequence = 0
+        # Snapshot versions must stay monotonic across process restarts. A
+        # browser that saw version N from the previous process silently drops
+        # every snapshot from a fresh process that restarts at 1, and keeps
+        # showing stale data until a manual reload. Production seeds this with
+        # the process start time (see ``restart_safe_epoch``) so a new process
+        # always starts above any value a prior process could have emitted.
+        # Tests and replay tooling keep the default 0 for readable versions.
+        self._snapshot_sequence = epoch * _SNAPSHOTS_PER_EPOCH_SECOND
         self._last_snapshot_content_hash: str | None = None
         self._lock = threading.Lock()
+
+    @staticmethod
+    def restart_safe_epoch() -> int:
+        return int(time.time())
 
     def publish_snapshot(
         self,

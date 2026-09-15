@@ -1,15 +1,14 @@
 import logging
 import asyncio
-import traceback
 import json
 import math
 import time
+from datetime import datetime, timezone
 from typing import Any
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Header, HTTPException, Response
-from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
-import os
 from typing import Annotated
 
 from waterfallhunter.config import settings
@@ -45,8 +44,6 @@ from waterfallhunter.core.ai_veto import (
     CANONICAL_ADVISORY_DELIVERY_GRACE_SECONDS,
 )
 from waterfallhunter.core.fundamental_scorer import FundamentalScorer
-from waterfallhunter.core.ai_signal_advisor import AISignalAdvisor
-from waterfallhunter.core.backtester import Backtester
 from waterfallhunter.core.risk_manager import build_signal_leverage_advisory
 from waterfallhunter.core.dashboard import compact_metrics
 from waterfallhunter.core.decision_terminal import build_decision_terminal
@@ -91,7 +88,12 @@ from waterfallhunter.core.lbank_execution_decision import (
 from waterfallhunter.core.lbank_signal_ledger import (
     LBankSignalLedger,
 )
-from waterfallhunter.core.signal_metadata import build_signal_metadata_input
+from waterfallhunter.core.signal_metadata import (
+    STRICT_STRATEGY_PROFILE,
+    build_signal_metadata_input,
+)
+from waterfallhunter.core.backtester_v2 import SCHEMA as BACKTEST_V2_SCHEMA
+from waterfallhunter.core.managed_sqlite import connect_managed_sqlite
 from waterfallhunter.core.signal_metadata_store import (
     require_signal_metadata_completeness,
 )
@@ -143,17 +145,25 @@ async def app_lifespan(_: FastAPI):
 
 
 def _signal_alert_allowed(metrics: dict) -> bool:
-    """Allow Telegram alerts when cascade PASS and readiness >= 55."""
-    cascade_status = str((metrics.get("cascade_intelligence") or {}).get("status", "FAIL"))
-    readiness = float(metrics.get("readiness_score", 0))
-    structure = str(metrics.get("structure_status", ""))
-    if cascade_status != "PASS":
+    """Return whether a TRIGGERED event carries a strict (non-experimental) profile.
+
+    Historically this read ``readiness_score`` / ``structure_status``, keys no
+    producer ever wrote, so it returned False for every real packet and every
+    TRIGGERED event was logged as "experimental". The canonical decision packet
+    is the authority: a strict profile is one whose entry decision is not
+    hard-blocked and whose cascade gate passed.
+    """
+    profile = str(metrics.get("strategy_profile") or "")
+    if profile and profile != STRICT_STRATEGY_PROFILE:
         return False
-    if readiness < 55:
+    decision = metrics.get("entry_decision")
+    if not isinstance(decision, dict):
         return False
-    if structure == "STRUCTURE_INVALIDATED":
+    if decision.get("hard_blocked") is True:
         return False
-    return True
+    cascade = metrics.get("cascade_intelligence")
+    cascade_status = str(cascade.get("status") or "") if isinstance(cascade, dict) else ""
+    return cascade_status == "PASS"
 
 app = FastAPI(
     title="WaterfallHunter API - Production",
@@ -322,12 +332,7 @@ fundamental_scorer = FundamentalScorer(api_keys={
     "lunarcrush": settings.lunarcrush_api_key,
     "twitter": settings.twitter_bearer_token,
 })
-ai_advisor = AISignalAdvisor(
-    # Gemini removed
-    ollama_url=settings.ollama_base_url,
-    ollama_model=settings.ollama_model,
-)
-backtester = Backtester(db_path=settings.backtester_db_path)
+
 
 _hunter_running = False
 _hunter_last_completed_at: float | None = None
@@ -361,7 +366,8 @@ _DASHBOARD_CLIENT_QUEUE_LIMIT = 2
 _DASHBOARD_SNAPSHOT_BROADCAST_INTERVAL_SECONDS = 5.0
 _DASHBOARD_HEARTBEAT_INTERVAL_SECONDS = 15.0
 _dashboard_event_buffer = DashboardEventBuffer(
-    replay_limit=_DASHBOARD_REPLAY_EVENT_LIMIT
+    replay_limit=_DASHBOARD_REPLAY_EVENT_LIMIT,
+    epoch=DashboardEventBuffer.restart_safe_epoch(),
 )
 _dashboard_preview_cache: tuple[
     DashboardEventBuffer,
@@ -1109,37 +1115,64 @@ def _build_entry_notification_worker() -> DurableNotificationWorker | None:
 # Records each ENTRY_READY signal: entry, exit, and result (win/loss/timeout)
 
 _backtest_active_trades: dict[str, dict] = {}  # symbol -> trade info
+# A newly listed contract is invisible until the next catalogue refresh, so
+# six hours (the old value) was far too coarse for a market that lists daily.
+_CATALOG_REFRESH_INTERVAL_SECONDS = 900
+_BACKTEST_DB_PATH = settings.backtester_v2_db_path
+_BACKTEST_CAPITAL_USD = 100.0
+_BACKTEST_POSITION_FRACTION = 0.30
+_BACKTEST_MIN_LEVERAGE = 4
+_BACKTEST_TIMEOUT_SECONDS = 86_400
+# Taker in, taker out, as a fraction of notional. Ignoring fees turned every
+# marginal loss into a break-even in the recorded results.
+_BACKTEST_ROUND_TRIP_FEE_PCT = 0.12
 
 def _start_backtest_trade(symbol: str, metrics: dict, decision: dict) -> None:
-    """Start tracking a backtest trade for an ENTRY_READY signal."""
+    """Start tracking a paper trade for an ENTRY_READY signal.
+
+    Reads the canonical decision packet. The previous implementation read
+    ``metrics["signal_summary"]`` and ``decision["entry_price"]`` — neither key
+    exists, so ``entry_price`` was always 0 and the function returned before
+    recording anything. Every trade in the "per-signal backtest" was therefore
+    never opened, which is why the results table never grew.
+    """
+    if symbol in _backtest_active_trades:
+        return
     try:
-        import sqlite3, time
-        signal = metrics.get("signal_summary") or {}
-        entry_price = float(signal.get("entry_price") or decision.get("entry_price") or 0)
-        stop_loss = float(signal.get("stop_loss") or decision.get("stop_loss") or 0)
-        tp1 = float(signal.get("take_profit") or signal.get("take_profit_1") or 0)
-        tp2 = float(signal.get("take_profit_2") or 0)
-        score = float(metrics.get("readiness_score") or 0)
-        
-        if entry_price <= 0 or stop_loss <= 0 or tp1 <= 0:
+        plan = decision.get("trade_plan")
+        if not isinstance(plan, dict):
             return
-        
-        # Determine leverage based on score
-        if score >= 80:
-            leverage = 14
-        elif score >= 70:
-            leverage = 12
-        elif score >= 55:
-            leverage = 8
-        else:
-            leverage = 4
-        
-        # Position size: 30% of $100 capital
-        capital = 100.0
-        position_usd = capital * 0.30
+
+        def num(value: Any) -> float:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return 0.0
+            return float(value) if math.isfinite(float(value)) else 0.0
+
+        entry_price = num(plan.get("entry_price"))
+        stop_loss = num(plan.get("stop_loss"))
+        tp1 = num(plan.get("take_profit_1"))
+        tp2 = num(plan.get("take_profit_2"))
+        readiness = num(decision.get("entry_readiness"))
+
+        # Short geometry: 0 < tp2 < tp1 < entry < stop.
+        if not (0 < tp2 < tp1 < entry_price < stop_loss):
+            return
+
+        advisory = decision.get("leverage_advisory")
+        leverage = None
+        if isinstance(advisory, dict) and advisory.get("status") == "AVAILABLE":
+            candidate = advisory.get("leverage")
+            if isinstance(candidate, int) and not isinstance(candidate, bool):
+                leverage = candidate
+        if leverage is None:
+            # No advisory means the risk bounds were not satisfiable; record
+            # the trade at the policy minimum rather than inventing a ladder.
+            leverage = _BACKTEST_MIN_LEVERAGE
+
+        position_usd = _BACKTEST_CAPITAL_USD * _BACKTEST_POSITION_FRACTION
         shares = position_usd * leverage / entry_price
-        
-        trade = {
+
+        _backtest_active_trades[symbol] = {
             "symbol": symbol,
             "entry_time": time.time(),
             "entry_price": entry_price,
@@ -1149,126 +1182,131 @@ def _start_backtest_trade(symbol: str, metrics: dict, decision: dict) -> None:
             "leverage": leverage,
             "position_usd": position_usd,
             "shares": shares,
-            "score": score,
+            "score": readiness,
+            "policy_version": str(decision.get("policy_version") or ""),
             "outcome": None,
         }
-        _backtest_active_trades[symbol] = trade
-        logger.info("Backtest trade STARTED for %s: entry=%.6f SL=%.6f TP1=%.6f TP2=%.6f lev=%dx",
-                    symbol, entry_price, stop_loss, tp1, tp2, leverage)
+        logger.info(
+            "Paper trade OPENED %s: entry=%.8f SL=%.8f TP1=%.8f TP2=%.8f lev=%dx readiness=%.1f",
+            symbol, entry_price, stop_loss, tp1, tp2, leverage, readiness,
+        )
     except Exception as exc:
-        logger.warning("Backtest start failed for %s: %s", symbol, exc)
+        logger.warning("Paper trade open failed for %s: %s", symbol, exc)
 
 
-def _check_backtest_trades(metrics_by_symbol: dict) -> None:
-    """Check active backtest trades against current prices — record exits."""
+def _backtest_current_price(candidate: dict) -> float:
+    """Resolve the live price for an open paper trade.
+
+    ``current_price`` is never written by any producer. The live price lives on
+    the candidate row as ``last_price`` (LBank reference), with the order-book
+    mid as a fallback.
+    """
+    if not isinstance(candidate, dict):
+        return 0.0
+
+    def num(value: Any) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return 0.0
+        value = float(value)
+        return value if math.isfinite(value) and value > 0 else 0.0
+
+    price = num(candidate.get("last_price"))
+    if price > 0:
+        return price
+    metrics = candidate.get("metrics")
+    if isinstance(metrics, dict):
+        micro = metrics.get("microstructure")
+        if isinstance(micro, dict):
+            bid = num(micro.get("best_bid"))
+            ask = num(micro.get("best_ask"))
+            if bid > 0 and ask > 0:
+                return (bid + ask) / 2.0
+    return 0.0
+
+
+def _check_backtest_trades(candidates_by_symbol: dict) -> None:
+    """Settle open paper trades against live prices.
+
+    Short-only: TP levels sit below entry, the stop sits above. Fees are
+    charged on both legs so a stop-out is recorded as the loss it actually is.
+    """
+    if not _backtest_active_trades:
+        return
     try:
-        import sqlite3, time
-        if not _backtest_active_trades:
-            return
-        
-        bt_db = sqlite3.connect("/app/data/backtest_v2.db")
-        bc = bt_db.cursor()
-        
-        # Ensure table exists
-        bc.execute("""
-            CREATE TABLE IF NOT EXISTS bt_v2_trades (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol TEXT,
-                entry_time TEXT,
-                exit_time TEXT,
-                entry_price REAL,
-                exit_price REAL,
-                pnl_pct REAL,
-                pnl_usd REAL,
-                outcome TEXT,
-                leverage INTEGER,
-                position_size_usd REAL,
-                shares_traded REAL,
-                signal_data TEXT
-            )
-        """)
-        
+        settled: list[tuple] = []
+        now = time.time()
+
         for symbol, trade in list(_backtest_active_trades.items()):
-            metrics = metrics_by_symbol.get(symbol, {})
-            signal = metrics.get("signal_summary") or {}
-            current_price = float(signal.get("current_price") or metrics.get("current_price") or 0)
-            
-            if current_price <= 0:
+            price = _backtest_current_price(candidates_by_symbol.get(symbol, {}))
+            if price <= 0:
+                # Symbol left the universe: close at timeout rather than
+                # leaking the position forever.
+                if now - trade["entry_time"] > _BACKTEST_TIMEOUT_SECONDS:
+                    settled.append((symbol, trade, trade["entry_price"], "timeout"))
                 continue
-            
+
             entry = trade["entry_price"]
-            sl = trade["stop_loss"]
-            tp1 = trade["tp1"]
-            tp2 = trade["tp2"]
-            lev = trade["leverage"]
-            shares = trade["shares"]
-            
-            outcome = None
-            exit_price = current_price
-            
-            # Short trades (entry > TP, SL > entry)
-            if tp1 < entry:  # Short
-                if current_price <= tp2:
-                    outcome = "win_tp2"
-                    exit_price = tp2
-                elif current_price <= tp1:
-                    outcome = "win_tp1"
-                    exit_price = tp1
-                elif current_price >= sl:
-                    outcome = "loss_sl"
-                    exit_price = sl
-            else:  # Long
-                if current_price >= tp2:
-                    outcome = "win_tp2"
-                    exit_price = tp2
-                elif current_price >= tp1:
-                    outcome = "win_tp1"
-                    exit_price = tp1
-                elif current_price <= sl:
-                    outcome = "loss_sl"
-                    exit_price = sl
-            
-            # Check timeout (24 hours)
-            if outcome is None and (time.time() - trade["entry_time"]) > 86400:
-                outcome = "timeout"
-            
+            outcome: str | None = None
+            exit_price = price
+
+            # Stop is checked first: within one polling interval both levels
+            # can be touched, and assuming the favourable one is how paper
+            # results drift away from reality.
+            if price >= trade["stop_loss"]:
+                outcome, exit_price = "loss_sl", trade["stop_loss"]
+            elif price <= trade["tp2"]:
+                outcome, exit_price = "win_tp2", trade["tp2"]
+            elif price <= trade["tp1"]:
+                outcome, exit_price = "win_tp1", trade["tp1"]
+            elif now - trade["entry_time"] > _BACKTEST_TIMEOUT_SECONDS:
+                outcome, exit_price = "timeout", price
+
             if outcome is not None:
-                # Calculate PnL
-                if outcome == "timeout":
-                    pnl_pct = 0.0
-                    pnl_usd = 0.0
-                elif outcome.startswith("win"):
-                    pnl_pct = ((entry - exit_price) / entry) * lev * 100 if tp1 < entry else ((exit_price - entry) / entry) * lev * 100
-                    pnl_usd = trade["position_usd"] * (pnl_pct / 100)
-                else:  # loss_sl
-                    pnl_pct = ((exit_price - entry) / entry) * lev * 100 if tp1 < entry else ((entry - exit_price) / entry) * lev * 100
-                    pnl_pct = -abs(pnl_pct)
-                    pnl_usd = trade["position_usd"] * (pnl_pct / 100)
-                
-                # Record trade
-                from datetime import datetime, timezone
-                entry_dt = datetime.fromtimestamp(trade["entry_time"], tz=timezone.utc).isoformat()
-                exit_dt = datetime.now(timezone.utc).isoformat()
-                
-                bc.execute("""
-                    INSERT INTO bt_v2_trades 
-                    (symbol, entry_time, exit_time, entry_price, exit_price, pnl_pct, pnl_usd, outcome, leverage, position_size_usd, shares_traded, signal_data)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    symbol, entry_dt, exit_dt, entry, exit_price,
-                    pnl_pct, pnl_usd, outcome, lev, trade["position_usd"], shares,
-                    f'{{"score": {trade["score"]}, "outcome_status": "{outcome}", "strategy": "tp2"}}'
-                ))
-                bt_db.commit()
-                
-                logger.info("Backtest trade CLOSED for %s: outcome=%s pnl=%.2f%% $%.2f",
-                            symbol, outcome, pnl_pct, pnl_usd)
-                
-                del _backtest_active_trades[symbol]
-        
-        bt_db.close()
+                settled.append((symbol, trade, exit_price, outcome))
+
+        if not settled:
+            return
+
+        rows = []
+        for symbol, trade, exit_price, outcome in settled:
+            entry = trade["entry_price"]
+            lev = trade["leverage"]
+            # Short: profit when price falls.
+            gross_pct = ((entry - exit_price) / entry) * 100.0
+            net_pct = (gross_pct - _BACKTEST_ROUND_TRIP_FEE_PCT) * lev
+            pnl_usd = trade["position_usd"] * (net_pct / 100.0)
+            entry_dt = datetime.fromtimestamp(trade["entry_time"], tz=timezone.utc).isoformat()
+            rows.append((
+                symbol, entry_dt, datetime.now(timezone.utc).isoformat(),
+                entry, exit_price, net_pct, pnl_usd, outcome, lev,
+                trade["position_usd"], trade["shares"],
+                json.dumps({
+                    "entry_readiness": trade["score"],
+                    "outcome_status": outcome,
+                    "policy_version": trade.get("policy_version", ""),
+                    "gross_pct": round(gross_pct, 6),
+                    "fee_pct": _BACKTEST_ROUND_TRIP_FEE_PCT,
+                }),
+            ))
+            logger.info(
+                "Paper trade CLOSED %s: %s exit=%.8f net=%.2f%% ($%.2f) lev=%dx",
+                symbol, outcome, exit_price, net_pct, pnl_usd, lev,
+            )
+
+        with connect_managed_sqlite(_BACKTEST_DB_PATH, timeout=10.0) as conn:
+            conn.executescript(BACKTEST_V2_SCHEMA)
+            conn.executemany(
+                "INSERT INTO bt_v2_trades (symbol, entry_time, exit_time, entry_price,"
+                " exit_price, pnl_pct, pnl_usd, outcome, leverage, position_size_usd,"
+                " shares_traded, signal_data) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                rows,
+            )
+            conn.commit()
+
+        for symbol, _trade, _exit, _outcome in settled:
+            _backtest_active_trades.pop(symbol, None)
     except Exception as exc:
-        logger.warning("Backtest check failed: %s", exc)
+        logger.warning("Paper trade settlement failed: %s", exc)
 
 
 async def _entry_notification_loop(interval_seconds: float = 0.5) -> None:
@@ -1331,7 +1369,16 @@ async def _refresh_canonical_ai_advisory(
         return
     if current_decision.get("event_id") != decision_event_id:
         return
-    current_metrics["ai_advisory"] = advisory
+    # Merge, never replace. The deterministic veto (bid/ask wall check) lives
+    # on the same dict and is set synchronously before the decision is built.
+    # The LLM advisory dict has no ``deterministic_veto`` key, so a full
+    # replacement silently cleared the veto and a later freshness projection
+    # re-ran build_entry_decision on metrics that no longer carried it.
+    existing = current_metrics.get("ai_advisory")
+    if isinstance(existing, dict):
+        current_metrics["ai_advisory"] = {**existing, **advisory}
+    else:
+        current_metrics["ai_advisory"] = advisory
 
 
 def _lbank_shadow_health_snapshot() -> dict:
@@ -3548,6 +3595,10 @@ async def evaluate_candidate(
         lifecycle_id=int(data.get("lifecycle_id") or 1),
         previous_decision=previous_entry_decision,
     )
+    # The decision packet is attached to result_metrics only after the
+    # leverage advisory is built, so expose readiness explicitly here rather
+    # than relying on metrics["entry_decision"] being present yet.
+    result_metrics["entry_readiness"] = entry_decision.get("entry_readiness")
     leverage_advisory = _apply_signal_leverage_advisory(
         result_metrics,
         execution_suitability,
@@ -3592,11 +3643,13 @@ async def evaluate_candidate(
         )
     result_metrics["entry_decision"] = entry_decision
 
-    # ── Per-signal backtest: start trade on ENTRY_READY ──
+    # ── Per-signal paper trade: open on ENTRY_READY, settle all open ones ──
     if entry_decision.get("decision") == "ENTRY_READY":
         _start_backtest_trade(symbol, result_metrics, entry_decision)
-    # ── Per-signal backtest: check active trades ──
-    _check_backtest_trades({symbol: result_metrics})
+    # Settle against every live candidate, not only the symbol just evaluated:
+    # a position opened on a symbol that later stops being scheduled would
+    # otherwise never reach its stop or target.
+    _check_backtest_trades(scanner.active_candidates)
 
     try:
         technical_trade_plan_shadow = validator.build_technical_trade_plan_shadow(
@@ -4535,7 +4588,7 @@ async def startup_event():
 
     _start_background_task(
         scanner.start_background_scanner(
-            21600
+            _CATALOG_REFRESH_INTERVAL_SECONDS
         )
     )
 
@@ -5124,10 +5177,10 @@ async def get_raw_candidates(response: Response):
 
 @app.get("/api/backtest/results")
 async def backtest_results():
-    """Backtester V2 results - $100 capital, 30% exposure, 3 positions, 4-18x leverage."""
+    """Live paper-trade results — $100 capital, 30% per position, 4-18x isolated."""
     try:
         from waterfallhunter.core.backtester_v2 import BacktesterV2
-        bt = BacktesterV2(db_path="/app/data/backtest_v2.db")
+        bt = BacktesterV2(db_path=_BACKTEST_DB_PATH)
         metrics = bt.compute_metrics()
         equity = bt.get_equity_curve()
         trades = bt.get_trade_history(limit=20)
@@ -5149,12 +5202,3 @@ async def fundamental_score_endpoint(symbol: str = ""):
     except Exception as exc:
         return {"error": str(exc), "fundamental_score": 0, "confidence": 0}
 
-
-@app.get("/api/ai-advisory")
-async def ai_advisory_endpoint(symbol: str = ""):
-    """AI advisory endpoint for a specific symbol."""
-    try:
-        result = await ai_advisor.analyze({"symbol": symbol})
-        return result
-    except Exception as exc:
-        return {"error": str(exc), "symbol": symbol, "overall": "UNAVAILABLE"}

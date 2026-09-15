@@ -101,7 +101,7 @@ class PerformanceMetrics:
     max_concurrent_positions: int = 0
 
 
-_SCHEMA = """
+SCHEMA = """
 CREATE TABLE IF NOT EXISTS bt_v2_trades (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     symbol          TEXT NOT NULL,
@@ -186,7 +186,7 @@ class BacktesterV2:
 
     def _ensure_db(self) -> None:
         with self._connect() as conn:
-            conn.executescript(_SCHEMA)
+            conn.executescript(SCHEMA)
             conn.commit()
         self._load_state()
 
