@@ -1,1 +1,110 @@
-{"annotations":{"list":[]},"editable":false,"panels":[{"type":"stat","title":"Backend Up","targets":[{"expr":"up{job=\"waterfall-backend\"}"}]},{"type":"stat","title":"Tracked Candidates","targets":[{"expr":"waterfall_tracked_candidates"}]}],"schemaVersion":39,"title":"WaterfallHunter Operations","version":1}
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "schemaVersion": 39,
+  "title": "WaterfallHunter Operations",
+  "uid": "waterfallhunter-operations",
+  "version": 2,
+  "time": {"from": "now-6h", "to": "now"},
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Backend Up",
+      "gridPos": {"h": 5, "w": 4, "x": 0, "y": 0},
+      "targets": [{"expr": "up{job=\"waterfall-backend\"}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}], "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}}, "overrides": []}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Tracked Candidates",
+      "gridPos": {"h": 5, "w": 4, "x": 4, "y": 0},
+      "targets": [{"expr": "waterfall_tracked_candidates", "refId": "A"}],
+      "fieldConfig": {"defaults": {"decimals": 0}, "overrides": []}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Catalogue Age",
+      "description": "Must stay below 20 minutes. The catalogue refreshes every 15 minutes.",
+      "gridPos": {"h": 5, "w": 4, "x": 8, "y": 0},
+      "targets": [{"expr": "time() - waterfall_catalog_last_refresh_timestamp", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 900}, {"color": "red", "value": 1200}]}}, "overrides": []}
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Hunter Progress Age",
+      "description": "Must stay below 3 minutes; larger values indicate a stalled event loop or database lock.",
+      "gridPos": {"h": 5, "w": 4, "x": 12, "y": 0},
+      "targets": [{"expr": "time() - waterfall_hunter_last_progress_timestamp", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 120}, {"color": "red", "value": 180}]}}, "overrides": []}
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Backend RSS",
+      "description": "Absolute backend resident memory; the process has no artificial 2GiB limit.",
+      "gridPos": {"h": 5, "w": 4, "x": 16, "y": 0},
+      "targets": [{"expr": "process_resident_memory_bytes{job=\"waterfall-backend\"}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "bytes", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 2147483648}, {"color": "red", "value": 3221225472}]}}, "overrides": []}
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Notification Queue",
+      "gridPos": {"h": 5, "w": 4, "x": 20, "y": 0},
+      "targets": [{"expr": "sum(waterfall_notification_delivery_state_total{state=~\"PENDING|RETRY_WAIT|SENDING\"})", "refId": "A"}],
+      "fieldConfig": {"defaults": {"decimals": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 1}, {"color": "red", "value": 10}]}}, "overrides": []}
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Hunter Concurrency and Due Backlog",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 5},
+      "targets": [
+        {"expr": "waterfall_hunter_in_flight_evaluations", "legendFormat": "in flight", "refId": "A"},
+        {"expr": "waterfall_hunter_due_backlog", "legendFormat": "due backlog", "refId": "B"}
+      ],
+      "fieldConfig": {"defaults": {"min": 0}, "overrides": []}
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Evaluation Latency p95 by State",
+      "description": "Slow evaluations cause stale analysis and delayed decisions.",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 5},
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, state) (rate(waterfall_hunter_evaluation_duration_seconds_bucket[5m])))", "legendFormat": "{{state}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "s", "min": 0}, "overrides": []}
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "WebSocket Ownership",
+      "description": "Subscriptions materially above owned tasks/subscribers indicates a leak or failed retirement.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 13},
+      "targets": [
+        {"expr": "waterfall_websocket_ccxt_clients", "legendFormat": "CCXT clients", "refId": "A"},
+        {"expr": "waterfall_websocket_ccxt_subscriptions", "legendFormat": "subscriptions", "refId": "B"},
+        {"expr": "waterfall_websocket_active_tasks", "legendFormat": "active tasks", "refId": "C"},
+        {"expr": "waterfall_websocket_shared_evidence_active_subscribers", "legendFormat": "shared subscribers", "refId": "D"}
+      ],
+      "fieldConfig": {"defaults": {"min": 0}, "overrides": []}
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Execution Shadow Worker",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 13},
+      "targets": [
+        {"expr": "waterfall_lbank_execution_shadow_attempted_total", "legendFormat": "attempted", "refId": "A"},
+        {"expr": "waterfall_lbank_execution_shadow_observed_total", "legendFormat": "observed", "refId": "B"},
+        {"expr": "waterfall_lbank_execution_shadow_unavailable_total", "legendFormat": "unavailable", "refId": "C"},
+        {"expr": "time() - waterfall_lbank_execution_shadow_last_progress_timestamp", "legendFormat": "progress age", "refId": "D"}
+      ],
+      "fieldConfig": {"defaults": {"min": 0}, "overrides": []}
+    }
+  ]
+}
