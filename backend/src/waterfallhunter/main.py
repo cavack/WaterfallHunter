@@ -94,6 +94,11 @@ from waterfallhunter.core.signal_metadata import (
 )
 from waterfallhunter.core.backtester_v2 import SCHEMA as BACKTEST_V2_SCHEMA
 from waterfallhunter.core.managed_sqlite import connect_managed_sqlite
+from waterfallhunter.core.runtime_settings import RuntimeSettingsStore
+from waterfallhunter.routes_runtime_settings import (
+    bind_store as bind_runtime_settings_store,
+    router as runtime_settings_router,
+)
 from waterfallhunter.core.signal_metadata_store import (
     require_signal_metadata_completeness,
 )
@@ -264,6 +269,10 @@ app.include_router(
 app.include_router(
     build_recent_signals_router(db.db_path)
 )
+
+runtime_settings_store = RuntimeSettingsStore(db.db_path)
+bind_runtime_settings_store(runtime_settings_store)
+app.include_router(runtime_settings_router)
 
 execution_suitability_enricher = (
     LBankExecutionCandidateEnricher(
@@ -2407,7 +2416,9 @@ def _project_entry_decision_freshness(
         projected_metrics["entry_decision"] = explicit_expiry
         return projected_metrics
 
-    policy = EntryDecisionPolicy()
+    # Same policy the engine used, so the dashboard's freshness projection
+    # cannot disagree with the decision it is projecting.
+    policy = EntryDecisionPolicy.from_settings(runtime_settings_store.current())
     analysis_age = analysis_age_seconds if isinstance(analysis_age_seconds, (int, float)) else None
     reference_age = reference_age_seconds if isinstance(reference_age_seconds, (int, float)) else None
     freshness_expired = bool(
@@ -3586,12 +3597,15 @@ async def evaluate_candidate(
 
     reference_age = causal_age_seconds(decision_now_precise, reference_observed_at)
     previous_entry_decision = entry_decision_store.latest_for_symbol(symbol)
+    # Operator settings are read here, at decision time, so a change applies to
+    # new decisions only and never rewrites one already persisted.
     entry_decision = build_entry_decision(
         result_metrics,
         decision_state,
         evaluated_at=decision_now,
         analysis_age_seconds=causal_age_seconds(decision_now_precise, analysis_observed_at),
         reference_age_seconds=reference_age,
+        policy=EntryDecisionPolicy.from_settings(runtime_settings_store.current()),
         lifecycle_id=int(data.get("lifecycle_id") or 1),
         previous_decision=previous_entry_decision,
     )

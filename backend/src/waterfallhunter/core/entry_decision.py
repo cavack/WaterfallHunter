@@ -21,6 +21,42 @@ class EntryDecisionPolicy:
     anti_chase_hard_block_atr: float = 2.5
     maximum_spread_pct: float = 0.30
     maximum_slippage_pct: float = 0.30
+    coverage_minimum: float = 55.0
+    # Gate switches. Every one defaults to enabled, so an operator has to
+    # deliberately weaken the contract; nothing is loosened by omission.
+    gate_cascade_required: bool = True
+    gate_cross_exchange_required: bool = True
+    gate_timing_required: bool = True
+    gate_execution_required: bool = True
+    gate_anti_chase_enabled: bool = True
+    gate_freshness_required: bool = True
+
+    @classmethod
+    def from_settings(cls, settings: dict[str, Any] | None) -> "EntryDecisionPolicy":
+        """Build a policy from operator settings, ignoring unknown keys.
+
+        Settings are applied at decision time, so a change affects only
+        decisions taken after it was saved. Anything missing or malformed
+        falls back to the shipped default for that field.
+        """
+        if not isinstance(settings, dict):
+            return cls()
+        allowed = {f for f in cls.__dataclass_fields__ if f != "version"}
+        kwargs: dict[str, Any] = {}
+        for key, value in settings.items():
+            if key not in allowed:
+                continue
+            if key.startswith("gate_"):
+                if isinstance(value, bool):
+                    kwargs[key] = value
+            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                number = float(value)
+                if math.isfinite(number):
+                    kwargs[key] = number
+        if not kwargs:
+            return cls()
+        # Mark the policy so a persisted packet shows it was not the stock one.
+        return cls(version="entry_policy_v2_operator_tuned", **kwargs)
 
 
 def _record(value: Any) -> dict[str, Any]:
@@ -527,8 +563,15 @@ def _initial_block_reasons(
         reasons.append("DETERMINISTIC_MARKET_DATA_VETO")
     extension = _anti_chase_extension(metrics)
     anti_chase_late = bool(
-        extension is not None and extension >= policy.anti_chase_hard_block_atr
+        policy.gate_anti_chase_enabled
+        and extension is not None
+        and extension >= policy.anti_chase_hard_block_atr
     )
+    if anti_chase_late:
+        # Record the measured blocker. Without this the LATE packet carries no
+        # evidence of why it was reclassified, and the terminal-origin recovery
+        # path that searches for this reason can never fire.
+        reasons.append("ANTI_CHASE_HARD_BLOCK")
     return reasons, anti_chase_late
 
 
@@ -619,20 +662,20 @@ def _base_decision(
     # STRUCTURE_INVALIDATED is always a hard block
     if "STRUCTURE_INVALIDATED" in block_reasons:
         return "INVALIDATED"
-    # MANDATORY: cascade must PASS for any signal
-    cascade_ok = cascade_status == "PASS"
-    if not cascade_ok:
+    # Cascade is a hard gate unless an operator has explicitly disabled it.
+    if policy.gate_cascade_required and cascade_status != "PASS":
         return "NO_TRADE"
     # Fail-closed contract: evidence freshness and execution viability are hard
     # blocks, not scoring penalties. A packet must never advertise an actionable
     # decision while it is simultaneously hard-blocked.
     hard_block_reasons = {
-        "STALE_ANALYSIS",
-        "STALE_REFERENCE",
         "DETERMINISTIC_MARKET_DATA_VETO",
-        "EXECUTION_UNAVAILABLE",
         "TRADE_PLAN_EXPIRED",
     }
+    if policy.gate_freshness_required:
+        hard_block_reasons |= {"STALE_ANALYSIS", "STALE_REFERENCE"}
+    if policy.gate_execution_required:
+        hard_block_reasons.add("EXECUTION_UNAVAILABLE")
     if hard_block_reasons.intersection(block_reasons):
         return "NO_TRADE"
     # Freshness is settled above, so a surviving extended move is a genuine
@@ -642,12 +685,12 @@ def _base_decision(
 
     gates_pass = (
         readiness >= policy.entry_ready_minimum
-        and coverage_pct >= 55.0
+        and coverage_pct >= policy.coverage_minimum
         and direction_ok
         and trade_plan_ok
-        and timing_ok
-        and execution_ok
-        and cross_ok
+        and (timing_ok or not policy.gate_timing_required)
+        and (execution_ok or not policy.gate_execution_required)
+        and (cross_ok or not policy.gate_cross_exchange_required)
     )
     if gates_pass:
         decision = "ACTIVE" if status == "TRIGGERED" else "ENTRY_READY"

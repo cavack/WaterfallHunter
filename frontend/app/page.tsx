@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Activity, Wifi, WifiOff, Clock3, Zap, Target, ChevronDown, BarChart3, FlaskConical, DollarSign, TrendingUp, TrendingDown, Shield } from "lucide-react";
+import { Activity, Wifi, WifiOff, Clock3, Zap, Target, ChevronDown, BarChart3, FlaskConical, DollarSign, SlidersHorizontal } from "lucide-react";
 import { Candidate } from "@/components/score-card";
 import { DecisionTerminal, CandidateTable } from "@/components/decision-terminal";
 import { OutcomeEvidence } from "@/components/outcome-evidence";
@@ -13,6 +13,7 @@ import { LifecycleShadow } from "@/components/lifecycle-shadow";
 import { BacktestLab } from "@/components/backtest-lab";
 import { SignalFunnel, SignalFunnelData } from "@/components/signal-funnel";
 import { FinalRanking } from "@/components/final-ranking";
+import { SettingsPanel } from "@/components/settings-panel";
 import type { DashboardSnapshot } from "@/generated/dashboard-contract";
 import { dashboardSnapshot, dashboardStreamEvent } from "@/lib/dashboard-contract";
 import { summarizeCandidateFreshness } from "@/lib/decision-terminal-ui";
@@ -316,6 +317,7 @@ export default function Dashboard() {
   const [generatedAt, setGeneratedAt] = useState<number | null>(null);
   const [freshnessNow, setFreshnessNow] = useState<number | undefined>(undefined);
   const [researchOpen, setResearchOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const latestVersion = useRef(0);
   const latestGeneratedAt = useRef(0);
   const lastStreamEventAt = useRef(0);
@@ -545,7 +547,26 @@ export default function Dashboard() {
               </div>
             </section>
 
-            {/* ─── 6. Research (collapsed) ─── */}
+            {/* ─── 6. Settings (collapsed) ─── */}
+            <details
+              className="rounded-xl border border-slate-800/40 bg-slate-950/40 overflow-hidden"
+              open={settingsOpen}
+              onToggle={(e) => setSettingsOpen(e.currentTarget.open)}
+            >
+              <summary className="flex cursor-pointer list-none items-center justify-between px-4 py-3 text-xs font-semibold text-slate-500">
+                <span className="flex items-center gap-2">
+                  <SlidersHorizontal size={13} /> Decision Settings
+                </span>
+                <ChevronDown size={14} className={`transition-transform ${settingsOpen ? "rotate-180" : ""}`} />
+              </summary>
+              {settingsOpen && (
+                <div className="border-t border-slate-800/40 px-4 py-4">
+                  <SettingsPanel />
+                </div>
+              )}
+            </details>
+
+            {/* ─── 7. Research (collapsed) ─── */}
             <details
               className="rounded-xl border border-slate-800/40 bg-slate-950/40 overflow-hidden"
               open={researchOpen}

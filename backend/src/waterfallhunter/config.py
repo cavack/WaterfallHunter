@@ -64,6 +64,11 @@ class Settings(BaseSettings):
     solscan_api_key: str | None = None
     onchain_large_transfer_usd: float = 100_000.0
 
+    # Operator token for dashboard settings mutations. Unset means settings
+    # changes are refused outright — the panel is read-only until an operator
+    # deliberately provisions a token.
+    operator_token: str | None = None
+
     # Backtester settings.
     backtester_initial_capital: float = 200.0
     backtester_risk_per_trade: float = 0.02

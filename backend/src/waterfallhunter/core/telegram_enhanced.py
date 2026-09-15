@@ -230,6 +230,32 @@ def _fmt_db_size(bytes_value: int | float | None) -> str:
     return f"{b:.2f} PB"
 
 
+def _process_started_at() -> float | None:
+    """Backend process start time, from the kernel rather than the bot.
+
+    ``self.started_at`` is set when the Telegram bot starts, which is after the
+    backend is already up and is reset on every bot restart — that is why the
+    report showed "0h 0m" on a process that had been running for hours.
+
+    Note when verifying this by hand: ``docker exec ... python`` measures the
+    newly spawned interpreter, not the server. Read ``/proc/1/stat`` instead,
+    or call this from inside the running app.
+    """
+    try:
+        with open("/proc/uptime", "r") as fh:
+            host_uptime = float(fh.read().split()[0])
+        with open("/proc/self/stat", "r") as fh:
+            # The comm field (2) can contain spaces and parentheses, so split
+            # after the last ')'. What remains begins at field 3 (state), so
+            # starttime — field 22, 1-indexed — is index 19 of that remainder.
+            remainder = fh.read().rsplit(")", 1)[1].split()
+        ticks_per_second = os.sysconf("SC_CLK_TCK")
+        start_since_boot = float(remainder[19]) / ticks_per_second
+        return time.time() - (host_uptime - start_since_boot)
+    except (OSError, ValueError, IndexError, AttributeError):
+        return None
+
+
 def _fmt_uptime(started_at: float | None) -> str:
     if not started_at:
         return "—"
@@ -429,10 +455,28 @@ def _get_top_candidates(db_adapter: Any, scanner: Any, limit: int = _MAX_CANDIDA
 
 
 def _db_path(settings: Any) -> Path | None:
-    raw = getattr(settings, "db_path", None) or os.getenv("WFH_DB_PATH")
+    """Resolve the registry database.
+
+    ``settings.db_path`` does not exist — the field is ``registry_db_path`` —
+    so this always returned None and the health report always showed "DB Size: —".
+    """
+    raw = (
+        getattr(settings, "registry_db_path", None)
+        or getattr(settings, "db_path", None)
+        or os.getenv("WFH_DB_PATH")
+    )
     if not raw:
         return None
     return Path(raw)
+
+
+def _backtest_db_path(settings: Any) -> str:
+    """Resolve the paper-trade database from settings, not a literal."""
+    return str(
+        getattr(settings, "backtester_v2_db_path", None)
+        or os.getenv("WFH_BACKTEST_V2_DB_PATH")
+        or "/app/data/backtest_v2.db"
+    )
 
 
 def _db_size_bytes(db_path: Path | None) -> int | None:
@@ -459,33 +503,67 @@ def _tracked_count(db_adapter: Any, scanner: Any) -> int:
 
 
 def _memory_usage_percent() -> float | None:
-    """Best-effort RSS usage as a % of a 2GB ceiling (per the task spec).
+    """Process RSS as a percentage of total host memory.
 
-    Uses /proc/self/status on Linux; returns None if unavailable.
+    The previous version divided by a hardcoded 2GB ceiling that matches
+    nothing: the container has no memory limit set, and the host has 15GB. The
+    reported figure was therefore meaningless in both directions — it would
+    show 100% long before any real pressure, and it ignored the fact that the
+    OOM events that restarted this box were driven by host-wide memory, not by
+    this process alone.
     """
-
     try:
+        rss_kb: int | None = None
         with open("/proc/self/status", "r") as fh:
             for line in fh:
                 if line.startswith("VmRSS:"):
-                    kb = int(line.split()[1])
-                    # spec says "XX% / 2GB"
-                    ceiling_kb = 2 * 1024 * 1024
-                    return round((kb / ceiling_kb) * 100, 1)
+                    rss_kb = int(line.split()[1])
+                    break
+        if rss_kb is None:
+            return None
+
+        total_kb: int | None = None
+        with open("/proc/meminfo", "r") as fh:
+            for line in fh:
+                if line.startswith("MemTotal:"):
+                    total_kb = int(line.split()[1])
+                    break
+        if not total_kb:
+            return None
+        return round((rss_kb / total_kb) * 100, 1)
     except (OSError, ValueError, IndexError):
         return None
-    return None
 
 
 def _ai_status(settings: Any) -> str:
-    """Report Ollama availability."""
+    """Report Ollama availability by probing it.
 
-    # Gemini removed
-    ollama_host = getattr(settings, "ollama_host", None) or os.getenv("OLLAMA_HOST")
-    ollama_on = bool(ollama_host)
+    This previously read ``settings.ollama_host``, a field that does not exist
+    (the real one is ``ollama_base_url``), and then reported "down" purely
+    because that lookup returned None. It never contacted Ollama at all, so the
+    status was wrong in both directions: "down" while Ollama served thousands
+    of advisories, and it would have said "active" for an unreachable host.
+    """
+    base_url = str(getattr(settings, "ollama_base_url", "") or os.getenv("OLLAMA_HOST") or "").strip()
+    if not base_url:
+        return "Ollama: not configured"
 
-    ollama_str = f"Ollama: {'active' if ollama_on else 'down'}"
-    return ollama_str
+    model = str(getattr(settings, "ollama_model", "") or "")
+    try:
+        response = httpx.get(f"{base_url.rstrip('/')}/api/tags", timeout=4.0)
+        if response.status_code != 200:
+            return f"Ollama: unreachable (HTTP {response.status_code})"
+        names = {
+            str(entry.get("name") or "")
+            for entry in (response.json().get("models") or [])
+            if isinstance(entry, dict)
+        }
+    except Exception:
+        return "Ollama: unreachable"
+
+    if model and model not in names:
+        return f"Ollama: up, model {model} missing"
+    return f"Ollama: active ({model})" if model else "Ollama: active"
 
 
 def _exchange_sources_online() -> tuple[int, int]:
@@ -496,11 +574,11 @@ def _exchange_sources_online() -> tuple[int, int]:
     consulted first.
     """
 
-    total = len(_TRACKED_EXCHANGES)
-    # Conservative default: assume all configured sources are online. The
-    # health-report path is where real source failures get surfaced — see
-    # ``_collect_source_failures``.
-    return total, total
+    # There is no source-health registry to consult, so this cannot be
+    # measured here. Returning (total, total) reported "7/7 online"
+    # unconditionally — including while sources were failing — which is worse
+    # than reporting nothing. The caller renders "n/a" when total is 0.
+    return 0, len(_TRACKED_EXCHANGES)
 
 
 def _collect_source_failures(db_adapter: Any) -> list[str]:
@@ -583,7 +661,7 @@ def build_health_message(
     sources_online: tuple[int, int],
     source_failures: list[str] | None = None,
 ) -> str:
-    mem_str = f"{memory_pct:.1f}% / 2GB" if memory_pct is not None else "— / 2GB"
+    mem_str = f"{memory_pct:.1f}% of host RAM" if memory_pct is not None else "—"
     online, total = sources_online
     lines = [
         "🏥 <b>System Health</b>",
@@ -594,8 +672,13 @@ def build_health_message(
         f"💾 <b>Memory:</b> {mem_str}",
         f"⏱️ <b>Uptime:</b> {uptime}",
         f"🤖 <b>AI:</b> {escape(ai_status)}",
-        f"📡 <b>Sources:</b> {online}/{total} exchanges online",
     ]
+    # Source health has no registry to read, so report the configured set
+    # rather than claiming every source is online.
+    if online > 0:
+        lines.append(f"📡 <b>Sources:</b> {online}/{total} exchanges online")
+    else:
+        lines.append(f"📡 <b>Sources:</b> {total} configured (health not instrumented)")
     if source_failures:
         lines.append("⚠️ <b>Source failures:</b> " + escape(", ".join(source_failures)))
     lines.append(f"🚀 <b>Active signals:</b> {signal_count}")
@@ -832,7 +915,11 @@ class EnhancedTelegramBot:
         """Show backtest performance stats."""
         try:
             import sqlite3
-            bt = sqlite3.connect("/app/data/backtest_v2.db")
+            # Read-only: a reporting command must never be able to write to,
+            # or lock, the live paper-trade ledger.
+            bt = sqlite3.connect(
+                f"file:{_backtest_db_path(self.settings)}?mode=ro", uri=True, timeout=5.0
+            )
             bc = bt.cursor()
             bc.execute("SELECT COUNT(*), SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END), SUM(CASE WHEN pnl_usd < 0 THEN 1 ELSE 0 END), SUM(pnl_usd), AVG(pnl_usd) FROM bt_v2_trades")
             r = bc.fetchone()
@@ -866,7 +953,9 @@ class EnhancedTelegramBot:
         """Show model statistics."""
         try:
             import sqlite3
-            db = sqlite3.connect("/app/data/waterfall_registry.db")
+            db = sqlite3.connect(
+                f"file:{_db_path(self.settings)}?mode=ro", uri=True, timeout=5.0
+            )
             dc = db.cursor()
             dc.execute("SELECT COUNT(*) FROM lbank_signal_ledger")
             total_signals = dc.fetchone()[0]
@@ -938,7 +1027,7 @@ class EnhancedTelegramBot:
         db_path = _db_path(self.settings)
         db_size = _fmt_db_size(_db_size_bytes(db_path))
         mem = _memory_usage_percent()
-        uptime = _fmt_uptime(self.started_at)
+        uptime = _fmt_uptime(_process_started_at() or self.started_at)
         ai = _ai_status(self.settings)
         sources = _exchange_sources_online()
         failures = _collect_source_failures(self.db)
