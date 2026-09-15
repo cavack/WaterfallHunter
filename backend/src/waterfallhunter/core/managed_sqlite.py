@@ -25,7 +25,18 @@ def connect_managed_sqlite(
     isolation_level: str | None = "DEFERRED",
     uri: bool = False,
 ) -> sqlite3.Connection:
-    """Open a managed connection with verified foreign-key enforcement."""
+    """Open a managed connection with verified SQLite invariants.
+
+    ``timeout=`` configures Python's initial connection/open behaviour, but it
+    does not make the SQLite connection's own busy handler explicit. Under the
+    hunter's concurrent writes a raw/default busy handler can fail immediately
+    with ``database is locked`` while a transaction is about to finish. Apply
+    the same bound as the connection timeout to every managed connection.
+
+    WAL is intentionally *not* set here: journal mode is a file-level
+    migration invariant, and negotiating it on every read/write connection can
+    itself require an exclusive lock.
+    """
 
     conn: sqlite3.Connection | None = None
     try:
@@ -37,9 +48,14 @@ def connect_managed_sqlite(
             factory=ManagedSQLiteConnection,
         )
         conn.execute("PRAGMA foreign_keys=ON")
+        busy_timeout_ms = max(0, int(timeout * 1000))
+        conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
         row = conn.execute("PRAGMA foreign_keys").fetchone()
         if row != (1,):
             raise ManagedSQLiteError("MANAGED_SQLITE_FOREIGN_KEYS_UNAVAILABLE")
+        busy_row = conn.execute("PRAGMA busy_timeout").fetchone()
+        if busy_row != (busy_timeout_ms,):
+            raise ManagedSQLiteError("MANAGED_SQLITE_BUSY_TIMEOUT_UNAVAILABLE")
         return conn
     except Exception as exc:
         if conn is not None:
@@ -47,7 +63,7 @@ def connect_managed_sqlite(
         if isinstance(exc, ManagedSQLiteError):
             raise
         raise ManagedSQLiteError(
-            "MANAGED_SQLITE_FOREIGN_KEYS_UNAVAILABLE"
+            "MANAGED_SQLITE_CONNECTION_INVARIANTS_UNAVAILABLE"
         ) from exc
 
 

@@ -39,6 +39,15 @@ def test_managed_connection_enables_and_verifies_foreign_keys(
     assert enabled == (1,)
 
 
+def test_managed_connection_sets_busy_timeout_from_requested_timeout(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "managed-busy.db"
+
+    with connect_managed_sqlite(db_path, timeout=7.5) as conn:
+        assert conn.execute("PRAGMA busy_timeout").fetchone() == (7500,)
+
+
 def test_managed_connection_context_closes_immediately(tmp_path: Path) -> None:
     """Managed contexts must not leave SQLite connections live until cyclic GC."""
     db_path = tmp_path / "managed-close.db"
